@@ -11,8 +11,11 @@ app.use(express.json());
 
 let browser = null;
 
-// URL de Philaxmed - REEMPLAZA CON TU URL REAL
-const PHILAXMED_URL = 'https://kinefisio.cl/reserva-de-horas/'; // 👈 CAMBIA ESTO
+// URLs de las agendas de Philaxmed
+const AGENDAS = {
+    kineyfisio: 'https://web.philaxmed.cl/ReservaOnline.html?mc=kineyfisio#_',
+    cesmed: 'https://s2.philaxmed.cl/ReservaOnline.html?mc=cesmed#_'
+};
 
 async function getBrowser() {
     if (!browser) {
@@ -37,20 +40,21 @@ app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        service: 'Philaxmed Automation'
+        service: 'Philaxmed Multi-Agenda Automation'
     });
 });
 
 // Página principal
 app.get('/', (req, res) => {
     res.json({
-        service: 'Philaxmed Automation API',
+        service: 'Philaxmed Multi-Agenda API',
         version: '2.0.0',
+        agendas: Object.keys(AGENDAS),
         endpoints: {
             health: '/health',
-            especialidades: '/api/especialidades',
-            profesionales: '/api/profesionales?especialidad=NOMBRE',
-            horas: '/api/horas?especialidad=NOMBRE&profesional=NOMBRE&fecha=YYYY-MM-DD'
+            especialidades: '/api/especialidades?agenda=kineyfisio',
+            profesionales: '/api/profesionales?agenda=kineyfisio&especialidad=NOMBRE',
+            horas: '/api/horas?agenda=kineyfisio&especialidad=NOMBRE&profesional=NOMBRE&fecha=YYYY-MM-DD'
         },
         status: 'running'
     });
@@ -58,30 +62,49 @@ app.get('/', (req, res) => {
 
 // Obtener especialidades disponibles
 app.get('/api/especialidades', async (req, res) => {
+    const { agenda } = req.query;
+    
+    if (!agenda || !AGENDAS[agenda]) {
+        return res.status(400).json({
+            success: false,
+            error: 'Agenda no válida. Opciones: ' + Object.keys(AGENDAS).join(', ')
+        });
+    }
+    
     try {
-        console.log('📋 Obteniendo especialidades...');
+        console.log(`📋 Obteniendo especialidades de ${agenda}...`);
         
         const browserInstance = await getBrowser();
         const page = await browserInstance.newPage();
         
-        await page.goto(PHILAXMED_URL, {
+        await page.goto(AGENDAS[agenda], {
             waitUntil: 'networkidle2',
             timeout: 60000
         });
         
-        // Esperar a que cargue el selector de especialidades
-        await page.waitForSelector('select[name="especialidad"], #especialidad, select.especialidad', {
-            timeout: 10000
-        });
+        // Esperar a que cargue el formulario
+        await page.waitForTimeout(3000);
         
-        // Extraer especialidades
+        // Extraer especialidades (Philaxmed usa diferentes selectores)
         const especialidades = await page.evaluate(() => {
-            const select = document.querySelector('select[name="especialidad"], #especialidad, select.especialidad');
+            const selectors = [
+                'select#cmbEspecialidad',
+                'select[name="especialidad"]',
+                '#especialidad',
+                'select.especialidad'
+            ];
+            
+            let select = null;
+            for (const selector of selectors) {
+                select = document.querySelector(selector);
+                if (select) break;
+            }
+            
             if (!select) return [];
             
             const options = Array.from(select.options);
             return options
-                .filter(opt => opt.value && opt.value !== '')
+                .filter(opt => opt.value && opt.value !== '' && opt.value !== '0')
                 .map(opt => ({
                     value: opt.value,
                     text: opt.text.trim()
@@ -92,6 +115,7 @@ app.get('/api/especialidades', async (req, res) => {
         
         res.json({
             success: true,
+            agenda: agenda,
             especialidades: especialidades
         });
         
@@ -106,7 +130,14 @@ app.get('/api/especialidades', async (req, res) => {
 
 // Obtener profesionales por especialidad
 app.get('/api/profesionales', async (req, res) => {
-    const { especialidad } = req.query;
+    const { agenda, especialidad } = req.query;
+    
+    if (!agenda || !AGENDAS[agenda]) {
+        return res.status(400).json({
+            success: false,
+            error: 'Agenda no válida'
+        });
+    }
     
     if (!especialidad) {
         return res.status(400).json({
@@ -116,34 +147,68 @@ app.get('/api/profesionales', async (req, res) => {
     }
     
     try {
-        console.log(`👨‍⚕️ Obteniendo profesionales para: ${especialidad}`);
+        console.log(`👨‍⚕️ Obteniendo profesionales de ${agenda} para: ${especialidad}`);
         
         const browserInstance = await getBrowser();
         const page = await browserInstance.newPage();
         
-        await page.goto(PHILAXMED_URL, {
+        await page.goto(AGENDAS[agenda], {
             waitUntil: 'networkidle2',
             timeout: 60000
         });
         
+        await page.waitForTimeout(3000);
+        
         // Seleccionar especialidad
-        await page.waitForSelector('select[name="especialidad"], #especialidad, select.especialidad');
-        await page.select('select[name="especialidad"], #especialidad, select.especialidad', especialidad);
+        const especialidadSelected = await page.evaluate((esp) => {
+            const selectors = [
+                'select#cmbEspecialidad',
+                'select[name="especialidad"]',
+                '#especialidad'
+            ];
+            
+            for (const selector of selectors) {
+                const select = document.querySelector(selector);
+                if (select) {
+                    select.value = esp;
+                    select.dispatchEvent(new Event('change', { bubbles: true }));
+                    return true;
+                }
+            }
+            return false;
+        }, especialidad);
+        
+        if (!especialidadSelected) {
+            await page.close();
+            return res.json({
+                success: false,
+                error: 'No se pudo seleccionar la especialidad'
+            });
+        }
         
         // Esperar a que carguen los profesionales
-        await page.waitForTimeout(2000);
-        await page.waitForSelector('select[name="profesional"], #profesional, select.profesional', {
-            timeout: 10000
-        });
+        await page.waitForTimeout(3000);
         
         // Extraer profesionales
         const profesionales = await page.evaluate(() => {
-            const select = document.querySelector('select[name="profesional"], #profesional, select.profesional');
+            const selectors = [
+                'select#cmbProfesional',
+                'select[name="profesional"]',
+                '#profesional',
+                'select.profesional'
+            ];
+            
+            let select = null;
+            for (const selector of selectors) {
+                select = document.querySelector(selector);
+                if (select) break;
+            }
+            
             if (!select) return [];
             
             const options = Array.from(select.options);
             return options
-                .filter(opt => opt.value && opt.value !== '')
+                .filter(opt => opt.value && opt.value !== '' && opt.value !== '0')
                 .map(opt => ({
                     value: opt.value,
                     text: opt.text.trim()
@@ -154,6 +219,7 @@ app.get('/api/profesionales', async (req, res) => {
         
         res.json({
             success: true,
+            agenda: agenda,
             especialidad: especialidad,
             profesionales: profesionales
         });
@@ -169,7 +235,14 @@ app.get('/api/profesionales', async (req, res) => {
 
 // Obtener horas disponibles
 app.get('/api/horas', async (req, res) => {
-    const { especialidad, profesional, fecha } = req.query;
+    const { agenda, especialidad, profesional, fecha } = req.query;
+    
+    if (!agenda || !AGENDAS[agenda]) {
+        return res.status(400).json({
+            success: false,
+            error: 'Agenda no válida'
+        });
+    }
     
     if (!especialidad || !profesional) {
         return res.status(400).json({
@@ -179,74 +252,93 @@ app.get('/api/horas', async (req, res) => {
     }
     
     try {
-        console.log(`📅 Obteniendo horas para: ${profesional} - ${fecha || 'hoy'}`);
+        console.log(`📅 Obteniendo horas de ${agenda} para: ${profesional} - ${fecha || 'hoy'}`);
         
         const browserInstance = await getBrowser();
         const page = await browserInstance.newPage();
         
-        await page.goto(PHILAXMED_URL, {
+        await page.goto(AGENDAS[agenda], {
             waitUntil: 'networkidle2',
             timeout: 60000
         });
         
-        // Seleccionar especialidad
-        await page.waitForSelector('select[name="especialidad"], #especialidad, select.especialidad');
-        await page.select('select[name="especialidad"], #especialidad, select.especialidad', especialidad);
+        await page.waitForTimeout(3000);
         
-        await page.waitForTimeout(2000);
+        // Seleccionar especialidad
+        await page.evaluate((esp) => {
+            const select = document.querySelector('select#cmbEspecialidad, select[name="especialidad"], #especialidad');
+            if (select) {
+                select.value = esp;
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        }, especialidad);
+        
+        await page.waitForTimeout(3000);
         
         // Seleccionar profesional
-        await page.waitForSelector('select[name="profesional"], #profesional, select.profesional');
-        await page.select('select[name="profesional"], #profesional, select.profesional', profesional);
+        await page.evaluate((prof) => {
+            const select = document.querySelector('select#cmbProfesional, select[name="profesional"], #profesional');
+            if (select) {
+                select.value = prof;
+                select.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        }, profesional);
         
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(3000);
         
         // Si hay fecha, seleccionarla
         if (fecha) {
-            const dateInput = await page.$('input[type="date"], input[name="fecha"], #fecha');
-            if (dateInput) {
-                await dateInput.click({ clickCount: 3 });
-                await dateInput.type(fecha);
-            }
-            await page.waitForTimeout(2000);
+            await page.evaluate((f) => {
+                const dateInput = document.querySelector('input[type="date"], input#txtFecha, input[name="fecha"]');
+                if (dateInput) {
+                    dateInput.value = f;
+                    dateInput.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }, fecha);
+            await page.waitForTimeout(3000);
         }
         
         // Extraer horas disponibles
         const horas = await page.evaluate(() => {
-            // Buscar botones, divs o elementos con horas
             const horaElements = document.querySelectorAll(
-                '.hora-disponible, .hora, button[data-hora], div[data-hora], .time-slot'
+                'button.hora-disponible, .hora-btn, button[data-hora], div.time-slot, select#cmbHora option'
             );
             
             if (horaElements.length === 0) {
-                // Intentar con selectores alternativos
-                const select = document.querySelector('select[name="hora"], #hora, select.hora');
+                // Intentar con select de horas
+                const select = document.querySelector('select#cmbHora, select[name="hora"], #hora');
                 if (select) {
                     const options = Array.from(select.options);
                     return options
-                        .filter(opt => opt.value && opt.value !== '')
+                        .filter(opt => opt.value && opt.value !== '' && opt.value !== '0')
                         .map(opt => ({
                             hora: opt.text.trim(),
+                            value: opt.value,
                             disponible: true
                         }));
                 }
             }
             
-            return Array.from(horaElements).map(el => ({
-                hora: el.textContent.trim() || el.getAttribute('data-hora'),
-                disponible: !el.classList.contains('disabled') && !el.disabled
-            })).filter(h => h.hora);
+            return Array.from(horaElements).map(el => {
+                const isButton = el.tagName === 'BUTTON';
+                return {
+                    hora: el.textContent.trim() || el.getAttribute('data-hora') || el.value,
+                    value: el.value || el.getAttribute('data-hora'),
+                    disponible: !el.classList.contains('disabled') && !el.disabled
+                };
+            }).filter(h => h.hora);
         });
         
         await page.close();
         
         res.json({
             success: true,
+            agenda: agenda,
             especialidad: especialidad,
             profesional: profesional,
             fecha: fecha || new Date().toISOString().split('T')[0],
-            horas: horas,
-            total: horas.length
+            horas: horas.filter(h => h.disponible),
+            total: horas.filter(h => h.disponible).length
         });
         
     } catch (error) {
@@ -261,6 +353,7 @@ app.get('/api/horas', async (req, res) => {
 // Iniciar servidor
 app.listen(PORT, () => {
     console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+    console.log(`📋 Agendas disponibles: ${Object.keys(AGENDAS).join(', ')}`);
 });
 
 // Cerrar navegador al terminar
