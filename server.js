@@ -45,7 +45,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
     res.json({
         service: 'Philaxmed Multi-Agenda API',
-        version: '3.2.0',
+        version: '3.3.0',
         agendas: Object.keys(AGENDAS),
         endpoints: {
             health: '/health',
@@ -58,7 +58,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// ENDPOINT DE DEBUG - Para ver qué hay en la página
+// ENDPOINT DE DEBUG MEJORADO
 app.get('/api/debug', async (req, res) => {
     const { agenda } = req.query;
     
@@ -82,15 +82,6 @@ app.get('/api/debug', async (req, res) => {
         
         await page.waitForTimeout(5000);
         
-        // Estado inicial
-        const estadoInicial = await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            return {
-                total_buttons: buttons.length,
-                button_texts: buttons.map(b => b.textContent.trim()).slice(0, 10)
-            };
-        });
-        
         // Click en "Reservar Hora"
         await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
@@ -100,15 +91,6 @@ app.get('/api/debug', async (req, res) => {
         
         await page.waitForTimeout(3000);
         
-        // Estado después de "Reservar Hora"
-        const estadoDespuesReservar = await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            return {
-                total_buttons: buttons.length,
-                button_texts: buttons.map(b => b.textContent.trim())
-            };
-        });
-        
         // Click en "Por Especialidad"
         await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
@@ -116,19 +98,27 @@ app.get('/api/debug', async (req, res) => {
             if (especialidadBtn) especialidadBtn.click();
         });
         
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000); // Más tiempo de espera
         
-        // Estado después de "Por Especialidad"
-        const estadoDespuesEspecialidad = await page.evaluate(() => {
+        // Hacer scroll para cargar contenido
+        await page.evaluate(() => {
+            window.scrollTo(0, document.body.scrollHeight);
+        });
+        
+        await page.waitForTimeout(2000);
+        
+        // Extraer TODO el contenido visible
+        const estadoFinal = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('button'));
-            const divs = Array.from(document.querySelectorAll('div[class*="phx"]'));
+            const allDivs = Array.from(document.querySelectorAll('div'));
+            const listWidget = document.querySelector('.onlineBookingListWidget');
             
             return {
                 total_buttons: buttons.length,
                 button_texts: buttons.map(b => b.textContent.trim()),
-                total_divs: divs.length,
-                div_classes: divs.map(d => d.className).slice(0, 20),
-                html_sample: document.body.innerHTML.substring(0, 2000)
+                total_divs: allDivs.length,
+                listWidget_html: listWidget ? listWidget.innerHTML : 'NO ENCONTRADO',
+                body_text: document.body.innerText.substring(0, 3000)
             };
         });
         
@@ -137,11 +127,7 @@ app.get('/api/debug', async (req, res) => {
         res.json({
             success: true,
             agenda: agenda,
-            debug: {
-                paso_1_inicial: estadoInicial,
-                paso_2_despues_reservar: estadoDespuesReservar,
-                paso_3_despues_especialidad: estadoDespuesEspecialidad
-            }
+            debug: estadoFinal
         });
         
     } catch (error) {
@@ -193,34 +179,49 @@ app.get('/api/especialidades', async (req, res) => {
             if (especialidadBtn) especialidadBtn.click();
         });
         
-        await page.waitForTimeout(4000);
+        await page.waitForTimeout(5000);
         
-        // Extraer TODOS los botones y filtrar
+        // Hacer scroll
+        await page.evaluate(() => {
+            window.scrollTo(0, document.body.scrollHeight);
+        });
+        
+        await page.waitForTimeout(2000);
+        
+        // Extraer especialidades del texto visible
         const especialidades = await page.evaluate(() => {
             const especialidadesData = [];
-            const buttons = Array.from(document.querySelectorAll('button'));
+            const bodyText = document.body.innerText;
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
             
-            // Palabras clave a excluir
-            const excluir = [
-                'Volver', 'Buscar', 'Reservar', 'Confirmar', 'Cancelar',
-                'Por Profesional', 'Por Especialidad', 'Seleccione'
-            ];
+            // Buscar después de "Seleccione Especialidad"
+            const startIndex = lines.findIndex(l => l.includes('Seleccione') || l.includes('Especialidad'));
             
-            buttons.forEach(btn => {
-                const text = btn.textContent.trim();
-                
-                // Verificar que no contenga palabras excluidas
-                const esValido = text.length > 5 && 
-                                !excluir.some(palabra => text.includes(palabra));
-                
-                if (esValido) {
-                    especialidadesData.push({
-                        text: text,
-                        value: text,
-                        className: btn.className
-                    });
+            if (startIndex !== -1) {
+                // Las siguientes líneas deberían ser especialidades
+                for (let i = startIndex + 1; i < lines.length; i++) {
+                    const line = lines[i];
+                    
+                    // Filtrar líneas válidas
+                    if (line.length > 5 && 
+                        !line.includes('Volver') && 
+                        !line.includes('Buscar') &&
+                        !line.includes('Por Profesional') &&
+                        !line.includes('Por Especialidad') &&
+                        !line.includes('Seleccione')) {
+                        
+                        especialidadesData.push({
+                            text: line,
+                            value: line
+                        });
+                    }
+                    
+                    // Detener si encontramos "Volver" o "Buscar"
+                    if (line.includes('Volver') || line.includes('Buscar')) {
+                        break;
+                    }
                 }
-            });
+            }
             
             return especialidadesData;
         });
@@ -288,15 +289,22 @@ app.get('/api/profesionales', async (req, res) => {
             if (especialidadBtn) especialidadBtn.click();
         });
         
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000);
         
-        // Click en especialidad
+        // Click en especialidad (buscar en el texto)
         const clickedEspecialidad = await page.evaluate((esp) => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const especialidadBtn = buttons.find(btn => btn.textContent.trim() === esp);
-            if (especialidadBtn) {
-                especialidadBtn.click();
-                return true;
+            const bodyText = document.body.innerText;
+            if (bodyText.includes(esp)) {
+                // Buscar elemento clickeable
+                const allElements = Array.from(document.querySelectorAll('div, button, span'));
+                const especialidadEl = allElements.find(el => 
+                    el.textContent.trim() === esp && 
+                    el.offsetParent !== null
+                );
+                if (especialidadEl) {
+                    especialidadEl.click();
+                    return true;
+                }
             }
             return false;
         }, especialidad);
@@ -309,15 +317,14 @@ app.get('/api/profesionales', async (req, res) => {
             });
         }
         
-        await page.waitForTimeout(4000);
+        await page.waitForTimeout(5000);
         
         // Extraer profesionales
         const profesionales = await page.evaluate(() => {
             const profesionalesData = [];
-            const allText = document.body.innerText;
-            const lines = allText.split('\n').map(l => l.trim()).filter(l => l);
+            const bodyText = document.body.innerText;
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
             
-            // Buscar patrones de profesionales
             for (let i = 0; i < lines.length; i++) {
                 if (lines[i].includes('Especialidad:')) {
                     const nombre = lines[i - 1] || '';
@@ -358,7 +365,7 @@ app.get('/api/profesionales', async (req, res) => {
     }
 });
 
-// Obtener horas (igual que antes)
+// Obtener horas
 app.get('/api/horas', async (req, res) => {
     const { agenda, especialidad, profesional, fecha } = req.query;
     
@@ -404,30 +411,30 @@ app.get('/api/horas', async (req, res) => {
             if (especialidadBtn) especialidadBtn.click();
         });
         
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000);
         
         await page.evaluate((esp) => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const especialidadBtn = buttons.find(btn => btn.textContent.trim() === esp);
-            if (especialidadBtn) especialidadBtn.click();
+            const allElements = Array.from(document.querySelectorAll('div, button, span'));
+            const especialidadEl = allElements.find(el => 
+                el.textContent.trim() === esp && 
+                el.offsetParent !== null
+            );
+            if (especialidadEl) especialidadEl.click();
         }, especialidad);
         
-        await page.waitForTimeout(4000);
+        await page.waitForTimeout(5000);
         
-        // Click en profesional (buscar por texto)
+        // Click en profesional
         const clickedProfesional = await page.evaluate((prof) => {
-            const allText = document.body.innerText;
-            if (allText.includes(prof)) {
-                // Buscar elemento clickeable que contenga el nombre
-                const allElements = Array.from(document.querySelectorAll('div, button'));
-                const profesionalEl = allElements.find(el => 
-                    el.textContent.includes(prof) && 
-                    el.textContent.includes('Especialidad:')
-                );
-                if (profesionalEl) {
-                    profesionalEl.click();
-                    return true;
-                }
+            const allElements = Array.from(document.querySelectorAll('div, button, span'));
+            const profesionalEl = allElements.find(el => 
+                el.textContent.includes(prof) && 
+                el.textContent.includes('Especialidad:') &&
+                el.offsetParent !== null
+            );
+            if (profesionalEl) {
+                profesionalEl.click();
+                return true;
             }
             return false;
         }, profesional);
@@ -440,13 +447,13 @@ app.get('/api/horas', async (req, res) => {
             });
         }
         
-        await page.waitForTimeout(4000);
+        await page.waitForTimeout(5000);
         
         // Extraer horas
         const horas = await page.evaluate(() => {
             const horasData = [];
-            const allText = document.body.innerText;
-            const lines = allText.split('\n').map(l => l.trim()).filter(l => l);
+            const bodyText = document.body.innerText;
+            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
             
             lines.forEach(line => {
                 const horaMatch = line.match(/(\d{1,2}):(\d{2})/);
