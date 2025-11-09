@@ -1,4 +1,4 @@
-// server.js - Versión con diagnóstico A+B aplicado
+// server.js - Versión con diagnóstico A+B + capture /onlineBooking/application
 const express = require('express');
 const cors = require('cors');
 const puppeteerCore = require('puppeteer-core');
@@ -30,7 +30,6 @@ function log(...args) {
     console.log(`[${now()}]`, ...args);
 }
 
-// Normaliza texto (quita diacríticos, minúsculas, espacios múltiples)
 function normalizeStringNode(s) {
     if (!s) return '';
     try {
@@ -45,9 +44,7 @@ function normalizeStringNode(s) {
     }
 }
 
-// getBrowser con reinicio agresivo para Render (cada 6 requests)
 async function getBrowser() {
-    // Reiniciar navegador cada 6 peticiones para liberar memoria
     if (browser && requestCount >= 6) {
         log('🔄 Reiniciando navegador para liberar memoria (threshold alcanzado)...');
         try {
@@ -100,7 +97,6 @@ async function processQueue() {
         reject(error);
     } finally {
         isProcessing = false;
-        // Procesar siguiente petición después de 1.5 segundos para evitar saturación
         setTimeout(processQueue, 1500);
     }
 }
@@ -114,7 +110,6 @@ function queueRequest(handler) {
 
 // -------------------- UTILIDADES PARA PAGINA (PUPPETEER) --------------------
 
-// Click robusto por texto usando XPath (busca el texto en el elemento y lo clicka)
 async function clickButtonByText(page, text, timeout = 20000) {
     try {
         const textLower = String(text).toLowerCase();
@@ -127,27 +122,23 @@ async function clickButtonByText(page, text, timeout = 20000) {
             return true;
         }
     } catch (e) {
-        // fallback: intentar buscar por querySelector y comparar textContent en contexto de la página
         try {
             const clicked = await page.evaluate((t) => {
                 const norm = (s) => String(s||'').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim().replace(/\s+/g,' ');
                 const el = Array.from(document.querySelectorAll('button, a')).find(b => norm(b.textContent).includes(norm(t)));
                 if (el) {
-                    el.scrollIntoView({behavior: 'auto', block: 'center'});
+                    el.scrollIntoView({behavior: 'auto', block:'center'});
                     el.click();
                     return true;
                 }
                 return false;
             }, text);
             return clicked;
-        } catch (e2) {
-            // no hizo click
-        }
+        } catch (e2) {}
     }
     return false;
 }
 
-// Click en un elemento que contiene texto dentro de una lista (ej. .cellWidget)
 async function clickElementInSelectorByText(page, selector, text, timeout = 20000) {
     try {
         const tNorm = normalizeStringNode(text);
@@ -202,61 +193,38 @@ app.get('/', (req, res) => {
     });
 });
 
-// -------------------- ESPECIALIDADES --------------------
+// -------------------- ESPECIALIDADES / PROFESIONALES (idéntico a versión previa) --------------------
+// (omito cambios aquí por brevedad; mantén las mismas implementaciones que ya funcionan)
 
 app.get('/api/especialidades', async (req, res) => {
     const { agenda } = req.query;
-
     if (!agenda || !AGENDAS[agenda]) {
-        return res.status(400).json({
-            success: false,
-            error: 'Agenda no válida. Opciones: ' + Object.keys(AGENDAS).join(', ')
-        });
+        return res.status(400).json({ success: false, error: 'Agenda no válida. Opciones: ' + Object.keys(AGENDAS).join(', ') });
     }
-
     try {
         const result = await queueRequest(async () => {
             const startTs = Date.now();
             log(`📋 Obteniendo especialidades de ${agenda}...`);
-
             const browserInstance = await getBrowser();
             const page = await browserInstance.newPage();
-
-            // Set headers to mimic real browser
             try {
                 await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
                 await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8' });
                 await page.setViewport({ width: 1200, height: 900 });
             } catch (e) {}
-
-            // basic page listeners for debugging
             page.on('console', msg => { try{ console.log('PAGE LOG>', msg.type(), msg.text()); }catch(e){} });
             page.on('pageerror', err => { console.log('PAGE ERROR>', err && err.stack ? err.stack : String(err)); });
             page.on('requestfailed', req => { const f = req.failure && req.failure(); console.log('REQUEST FAILED>', req.url(), f && f.errorText); });
             page.on('request', req => { try { console.log('REQUEST>', req.method(), req.resourceType(), req.url()); } catch(e){} });
-
             try {
-                await page.goto(AGENDAS[agenda], {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 60000
-                });
+                await page.goto(AGENDAS[agenda], { waitUntil: 'domcontentloaded', timeout: 60000 });
                 console.log(`⏱ after goto (especialidades): ${Date.now() - startTs} ms`);
-
-                // Esperar a que aparezca el botón o el contenedor con especialidades
-                try {
-                    await page.waitForSelector('.cellWidget, .especialidad, .service-item', { timeout: 20000 });
-                } catch (e) {}
-
-                await clickButtonByText(page, 'reservar hora').catch(() => {});
+                try { await page.waitForSelector('.cellWidget, .especialidad, .service-item', { timeout: 20000 }); } catch (e) {}
+                await clickButtonByText(page, 'reservar hora').catch(()=>{});
                 await page.waitForTimeout(600);
-
-                await clickButtonByText(page, 'por especialidad').catch(() => {});
+                await clickButtonByText(page, 'por especialidad').catch(()=>{});
                 await page.waitForTimeout(800);
-
-                try {
-                    await page.waitForSelector('.cellWidget', { timeout: 20000 });
-                } catch (e) {}
-
+                try { await page.waitForSelector('.cellWidget', { timeout: 20000 }); } catch (e) {}
                 const especialidades = await page.evaluate(() => {
                     const especialidadesData = [];
                     const elems = Array.from(document.querySelectorAll('.cellWidget, .especialidad, .service-item, .item'));
@@ -264,10 +232,7 @@ app.get('/api/especialidades', async (req, res) => {
                         const text = (cell.textContent || '').trim();
                         const title = cell.getAttribute('title') || '';
                         if (text && text.length > 3) {
-                            especialidadesData.push({
-                                text: title || text,
-                                value: title || text
-                            });
+                            especialidadesData.push({ text: title || text, value: title || text });
                         }
                     });
                     if (especialidadesData.length === 0) {
@@ -280,84 +245,48 @@ app.get('/api/especialidades', async (req, res) => {
                     }
                     return especialidadesData;
                 });
-
                 console.log('DEBUG especialidades raw', JSON.stringify(especialidades));
-
                 requestCount++;
                 console.log(`✅ Encontradas ${especialidades.length} especialidades - tiempo: ${Date.now() - startTs} ms`);
-
-                return {
-                    success: true,
-                    agenda: agenda,
-                    total: especialidades.length,
-                    especialidades: especialidades
-                };
+                return { success: true, agenda: agenda, total: especialidades.length, especialidades: especialidades };
             } finally {
                 try { await page.close(); } catch (e) {}
             }
         });
-
         res.json(result);
-
     } catch (error) {
         console.error('❌ Error al obtener especialidades:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// -------------------- PROFESIONALES --------------------
-
 app.get('/api/profesionales', async (req, res) => {
     const { agenda, especialidad } = req.query;
-
-    if (!agenda || !AGENDAS[agenda]) {
-        return res.status(400).json({
-            success: false,
-            error: 'Agenda no válida'
-        });
-    }
-
-    if (!especialidad) {
-        return res.status(400).json({
-            success: false,
-            error: 'Especialidad es requerida'
-        });
-    }
+    if (!agenda || !AGENDAS[agenda]) return res.status(400).json({ success:false, error:'Agenda no válida' });
+    if (!especialidad) return res.status(400).json({ success:false, error:'Especialidad es requerida' });
 
     try {
         const result = await queueRequest(async () => {
             const startTs = Date.now();
             log(`👨‍⚕️ Obteniendo profesionales de ${agenda} para: ${especialidad}`);
-
             const browserInstance = await getBrowser();
             const page = await browserInstance.newPage();
-
             try {
                 await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
                 await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8' });
                 await page.setViewport({ width: 1200, height: 900 });
             } catch (e) {}
-
             page.on('console', msg => { try{ console.log('PAGE LOG>', msg.type(), msg.text()); }catch(e){} });
             page.on('pageerror', err => { console.log('PAGE ERROR>', err && err.stack ? err.stack : String(err)); });
             page.on('requestfailed', req => { const f = req.failure && req.failure(); console.log('REQUEST FAILED>', req.url(), f && f.errorText); });
             page.on('request', req => { try { console.log('REQUEST>', req.method(), req.resourceType(), req.url()); } catch(e){} });
-
             try {
-                await page.goto(AGENDAS[agenda], {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 60000
-                });
+                await page.goto(AGENDAS[agenda], { waitUntil: 'domcontentloaded', timeout: 60000 });
                 console.log(`⏱ after goto (profesionales): ${Date.now() - startTs} ms`);
-
                 await clickButtonByText(page, 'reservar hora').catch(() => {});
                 await page.waitForTimeout(600);
                 await clickButtonByText(page, 'por especialidad').catch(() => {});
                 await page.waitForTimeout(800);
-
                 const clickedEspecialidad = await clickElementInSelectorByText(page, '.cellWidget, .especialidad, .service-item', especialidad);
                 if (!clickedEspecialidad) {
                     const tried = await page.evaluate((esp) => {
@@ -373,19 +302,14 @@ app.get('/api/profesionales', async (req, res) => {
                         }
                         return false;
                     }, especialidad);
-                    if (!tried) {
-                        return { success: false, error: 'No se pudo seleccionar la especialidad' };
-                    }
+                    if (!tried) return { success:false, error:'No se pudo seleccionar la especialidad' };
                 }
-
                 await page.waitForTimeout(1200);
                 console.log(`⏱ after select especialidad: ${Date.now() - startTs} ms`);
-
                 const profesionales = await page.evaluate(() => {
                     const profesionalesData = [];
                     const bodyText = document.body.innerText || '';
                     const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
-
                     for (let i = 0; i < lines.length; i++) {
                         const line = lines[i];
                         if (/especialidad[:\s]/i.test(line) && i > 0) {
@@ -393,12 +317,7 @@ app.get('/api/profesionales', async (req, res) => {
                             const especialidad = line.replace(/Especialidad[:\s]/i, '').trim();
                             const sucursal = lines[i + 1] && /Sucursal[:\s]/i.test(lines[i+1]) ? lines[i+1].replace(/Sucursal[:\s]/i,'').trim() : '';
                             if (nombre && nombre.length > 3 && !/especialidad|seleccione/i.test(nombre)) {
-                                profesionalesData.push({
-                                    nombre: nombre,
-                                    especialidad: especialidad,
-                                    sucursal: sucursal,
-                                    value: nombre
-                                });
+                                profesionalesData.push({ nombre: nombre, especialidad: especialidad, sucursal: sucursal, value: nombre });
                             }
                         }
                     }
@@ -423,52 +342,31 @@ app.get('/api/profesionales', async (req, res) => {
                     });
                     return unique;
                 });
-
                 console.log('DEBUG profesionales raw', JSON.stringify(profesionales));
-
                 requestCount++;
                 console.log(`✅ Encontrados ${profesionales.length} profesionales - tiempo: ${Date.now() - startTs} ms`);
-
-                return {
-                    success: true,
-                    agenda: agenda,
-                    especialidad: especialidad,
-                    total: profesionales.length,
-                    profesionales: profesionales
-                };
+                return { success:true, agenda:agenda, especialidad:especialidad, total:profesionales.length, profesionales:profesionales };
             } finally {
                 try { await page.close(); } catch (e) {}
             }
         });
-
         res.json(result);
-
     } catch (error) {
         console.error('❌ Error al obtener profesionales:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        res.status(500).json({ success:false, error:error.message });
     }
 });
 
-// -------------------- HORAS --------------------
+// -------------------- HORAS (MEJORAS: intercept + capture application response) --------------------
 
 app.get('/api/horas', async (req, res) => {
     const { agenda, especialidad, profesional, fecha } = req.query;
 
     if (!agenda || !AGENDAS[agenda]) {
-        return res.status(400).json({
-            success: false,
-            error: 'Agenda no válida'
-        });
+        return res.status(400).json({ success:false, error:'Agenda no válida' });
     }
-
     if (!especialidad || !profesional) {
-        return res.status(400).json({
-            success: false,
-            error: 'Especialidad y profesional son requeridos'
-        });
+        return res.status(400).json({ success:false, error:'Especialidad y profesional son requeridos' });
     }
 
     try {
@@ -479,78 +377,100 @@ app.get('/api/horas', async (req, res) => {
             const browserInstance = await getBrowser();
             const page = await browserInstance.newPage();
 
-            // Set headers & viewport to mimic real browser
             try {
                 await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
                 await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8' });
                 await page.setViewport({ width: 1200, height: 900 });
             } catch (e) {}
 
+            // Interception: abort images/fonts/media to speed up
+            try {
+                await page.setRequestInterception(true);
+            } catch (e) {
+                // some puppeteer builds may not support interception; ignore
+            }
+
             // Keep last XHR response for possible JSON extraction
             let lastXHR = null;
 
-            // Listeners for page debug
+            // page listeners
             page.on('console', msg => { try{ console.log('PAGE LOG>', msg.type(), msg.text()); }catch(e){} });
             page.on('pageerror', err => { console.log('PAGE ERROR>', err && err.stack ? err.stack : String(err)); });
             page.on('requestfailed', req => { const f = req.failure && req.failure(); console.log('REQUEST FAILED>', req.url(), f && f.errorText); });
-            page.on('request', req => { try { console.log('REQUEST>', req.method(), req.resourceType(), req.url()); } catch(e){} });
 
-            // Enhanced response listener: try json, else text. mark interesting urls.
+            // request handling: abort heavy resources
+            page.on('request', req => {
+                try {
+                    const url = req.url().toLowerCase();
+                    const rtype = req.resourceType();
+                    if (rtype === 'image' || rtype === 'media' || rtype === 'font' ||
+                        /(\.png|\.jpg|\.jpeg|\.gif|\.svg|\.webp|\.mp4|\.mp3)$/i.test(url)) {
+                        // abort images/fonts/media to reduce noise and speed up
+                        try { req.abort(); return; } catch(e) { /* continue */ }
+                    }
+                } catch (e) {}
+                try { req.continue(); } catch (e) {}
+            });
+
+            // Enhanced response listener: capture JSON/text, and specifically capture /onlineBooking/application
             page.on('response', async (response) => {
                 try {
                     const req = response.request();
                     const rtype = req.resourceType && req.resourceType();
-                    if (rtype === 'xhr' || rtype === 'fetch') {
-                        const url = response.url();
-                        const urlLow = url.toLowerCase();
-                        const interesting = /hora|horas|slot|available|availability|getavailable|reserva|agenda|timeslot|getslots|disponible/.test(urlLow);
+                    const url = response.url();
+                    const urlLow = url.toLowerCase();
+                    const interesting = /hora|horas|slot|available|availability|getavailable|reserva|agenda|timeslot|getslots|disponible|onlinebooking\/application/.test(urlLow);
 
-                        const headers = response.headers ? (response.headers()['content-type'] || response.headers()['Content-Type'] || '') : '';
-                        let json = null;
-                        if (headers && headers.toLowerCase().includes('application/json')) {
-                            json = await response.json().catch(() => null);
-                            if (json) {
-                                console.log('DEBUG horas raw', JSON.stringify({ url: response.url(), body: json }));
-                                lastXHR = { url: response.url(), json: json, text: null };
-                            }
+                    const headers = response.headers ? (response.headers()['content-type'] || response.headers()['Content-Type'] || '') : '';
+                    let json = null;
+                    if ((headers && headers.toLowerCase().includes('application/json')) || urlLow.includes('/api/') || urlLow.includes('/application')) {
+                        json = await response.json().catch(() => null);
+                        if (json) {
+                            console.log('DEBUG horas raw', JSON.stringify({ url, body: json }));
+                            lastXHR = { url, json, text: null };
                         } else {
-                            // try json even if header missing
-                            json = await response.json().catch(() => null);
-                            if (json) {
-                                console.log('DEBUG horas raw (no-ct-json)', JSON.stringify({ url: response.url(), body: json }));
-                                lastXHR = { url: response.url(), json: json, text: null };
-                            } else {
-                                const txt = await response.text().catch(() => null);
-                                if (txt) {
-                                    // truncate very long responses in logs
-                                    const sample = txt.length > 10000 ? txt.slice(0, 10000) + '...[truncated]' : txt;
-                                    console.log('DEBUG horas raw-text', JSON.stringify({ url: response.url(), body: sample }));
-                                    lastXHR = { url: response.url(), json: null, text: sample };
-                                }
+                            // try fallback text
+                            const txt = await response.text().catch(() => null);
+                            if (txt) {
+                                const sample = txt.length > 20000 ? txt.slice(0,20000) + '...[truncated]' : txt;
+                                console.log('DEBUG horas raw-text', JSON.stringify({ url, body: sample }));
+                                lastXHR = { url, json: null, text: txt };
                             }
                         }
-                        if (interesting) {
-                            console.log('DEBUG horas url-match', response.url());
+                    } else {
+                        // also capture responses from the application endpoint specifically (may be HTML)
+                        if (urlLow.includes('/onlinebooking/application')) {
+                            const txt = await response.text().catch(() => '');
+                            const sample = txt.length > 20000 ? txt.slice(0,20000) + '...[truncated]' : txt;
+                            console.log('DEBUG horas-application', JSON.stringify({ url, sample }));
+                            lastXHR = { url, json: null, text: txt };
+                        } else if (interesting) {
+                            // try parse anyway
+                            const txt = await response.text().catch(() => null);
+                            if (txt) {
+                                const sample = txt.length > 20000 ? txt.slice(0,20000) + '...[truncated]' : txt;
+                                console.log('DEBUG horas raw-text (interesting)', JSON.stringify({ url, body: sample }));
+                                lastXHR = { url, json: null, text: txt };
+                            }
                         }
                     }
+                    if (interesting) {
+                        console.log('DEBUG horas url-match', url);
+                    }
                 } catch (e) {
-                    // don't break the flow
+                    // non-fatal
                 }
             });
 
             try {
-                await page.goto(AGENDAS[agenda], {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 60000
-                });
+                await page.goto(AGENDAS[agenda], { waitUntil: 'domcontentloaded', timeout: 60000 });
                 console.log(`⏱ after goto (horas): ${Date.now() - startTs} ms`);
 
-                await clickButtonByText(page, 'reservar hora').catch(() => {});
+                await clickButtonByText(page, 'reservar hora').catch(()=>{});
                 await page.waitForTimeout(600);
-                await clickButtonByText(page, 'por especialidad').catch(() => {});
+                await clickButtonByText(page, 'por especialidad').catch(()=>{});
                 await page.waitForTimeout(800);
 
-                // Seleccionar especialidad
                 let clickedEspecialidad = await clickElementInSelectorByText(page, '.cellWidget, .especialidad, .service-item', especialidad);
                 if (!clickedEspecialidad) {
                     const tried = await page.evaluate((esp) => {
@@ -566,15 +486,12 @@ app.get('/api/horas', async (req, res) => {
                         }
                         return false;
                     }, especialidad);
-                    if (!tried) {
-                        return { success: false, error: 'No se pudo seleccionar la especialidad' };
-                    }
+                    if (!tried) return { success:false, error:'No se pudo seleccionar la especialidad' };
                 }
 
                 await page.waitForTimeout(1200);
                 console.log(`⏱ after select especialidad (horas): ${Date.now() - startTs} ms`);
 
-                // Selección de profesional (robusta)
                 const profNorm = normalizeStringNode(profesional);
                 const clickedProfesional = await page.evaluate((profNorm) => {
                     function n(s){ return String(s||'').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim().replace(/\s+/g,' '); }
@@ -583,7 +500,6 @@ app.get('/api/horas', async (req, res) => {
                         return t && n(t).includes(profNorm);
                     });
                     if (candidates.length === 0) return false;
-
                     let chosen = candidates.find(c => /especialidad[:\s]/i.test(c.textContent)) || candidates[0];
                     try {
                         const clickable = chosen.querySelector('button, a') || chosen;
@@ -606,15 +522,21 @@ app.get('/api/horas', async (req, res) => {
                         clickable.click();
                         return true;
                     });
-                    if (!fallback) {
-                        return { success: false, error: 'No se pudo seleccionar el profesional' };
-                    }
+                    if (!fallback) return { success:false, error:'No se pudo seleccionar el profesional' };
                 }
 
                 await page.waitForTimeout(1200);
                 console.log(`⏱ after select profesional: ${Date.now() - startTs} ms`);
 
-                // Si detectamos XHR JSON reciente, intentamos extraer horarios desde ahí primero
+                // Wait specifically for the application POST that builds availability
+                try {
+                    await page.waitForResponse(r => (r.url().toLowerCase().includes('/onlinebooking/application') || r.url().toLowerCase().includes('/application')) && r.status() === 200, { timeout: 20000 });
+                    console.log('ℹ️ Capturada response /onlineBooking/application');
+                } catch (e) {
+                    console.log('⚠️ Timeout esperando /onlineBooking/application response');
+                }
+
+                // Try to extract times from lastXHR if present
                 function findTimesInObject(o, results = []) {
                     if (!o) return results;
                     if (Array.isArray(o)) {
@@ -647,16 +569,23 @@ app.get('/api/horas', async (req, res) => {
                         if (horasFromXHR && horasFromXHR.length > 0) {
                             console.log('ℹ️ USING XHR JSON for horas, found', horasFromXHR.length);
                         } else {
-                            // if no times found, still keep lastXHR.url for context
                             console.log('ℹ️ lastXHR captured but no direct time strings found. lastXHR.url=', lastXHR.url);
                         }
                     } catch (e) {
                         console.log('WARN: error processing lastXHR json', e && e.message);
                     }
+                } else if (lastXHR && lastXHR.text && lastXHR.url && lastXHR.url.toLowerCase().includes('/onlinebooking/application')) {
+                    // try regex against captured text
+                    try {
+                        const m = lastXHR.text.match(/\d{1,2}:\d{2}/g);
+                        if (m) horasFromXHR = Array.from(new Set(m));
+                        if (horasFromXHR.length > 0) {
+                            console.log('ℹ️ USING application TEXT for horas, found', horasFromXHR.length);
+                        }
+                    } catch (e) {}
                 }
 
                 let uniqueHoras = [];
-
                 if (horasFromXHR && horasFromXHR.length > 0) {
                     const seen = new Set();
                     horasFromXHR.forEach(h => {
@@ -667,14 +596,11 @@ app.get('/api/horas', async (req, res) => {
                         }
                     });
                 } else {
-                    // Extracción de horas (regex robusto) desde DOM como fallback
                     const horas = await page.evaluate(() => {
                         const horasData = [];
                         const bodyText = document.body.innerText || '';
                         const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
-
                         const regex = /(?:^|\s)(\d{1,2}:\d{2})(?:\s*[-–—]?\s*(DISPONIBLE|OCUPADO|RESERVADO)?)?/i;
-
                         for (const line of lines) {
                             const m = line.match(regex);
                             if (m) {
@@ -682,16 +608,11 @@ app.get('/api/horas', async (req, res) => {
                                 const estadoRaw = (m[2] || '').toUpperCase();
                                 const estado = estadoRaw === 'OCUPADO' ? 'OCUPADO' : (estadoRaw === 'DISPONIBLE' ? 'DISPONIBLE' : 'DESCONOCIDO');
                                 const disponible = estado === 'DISPONIBLE' || (estado === 'DESCONOCIDO' && !/OCUPADO/i.test(line));
-                                horasData.push({
-                                    hora: hora,
-                                    disponible: disponible,
-                                    estado: estado
-                                });
+                                horasData.push({ hora: hora, disponible: disponible, estado: estado });
                             }
                         }
                         return horasData;
                     });
-
                     const horasDisponibles = (horas || []).filter(h => h.disponible).map(h => ({ hora: h.hora, estado: h.estado }));
                     const seen = new Set();
                     for (const h of horasDisponibles) {
@@ -721,13 +642,9 @@ app.get('/api/horas', async (req, res) => {
         });
 
         res.json(result);
-
     } catch (error) {
         console.error('❌ Error al obtener horas:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
+        res.status(500).json({ success:false, error:error.message });
     }
 });
 
