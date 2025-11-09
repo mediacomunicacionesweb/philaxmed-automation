@@ -11,7 +11,6 @@ app.use(express.json());
 
 let browser = null;
 
-// URLs de las agendas de Philaxmed
 const AGENDAS = {
     kineyfisio: 'https://web.philaxmed.cl/ReservaOnline.html?mc=kineyfisio#_',
     cesmed: 'https://s2.philaxmed.cl/ReservaOnline.html?mc=cesmed#_'
@@ -21,7 +20,7 @@ async function getBrowser() {
     if (!browser) {
         try {
             browser = await puppeteerCore.launch({
-                args: chromium.args,
+                args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
                 defaultViewport: chromium.defaultViewport,
                 executablePath: await chromium.executablePath(),
                 headless: chromium.headless,
@@ -35,7 +34,6 @@ async function getBrowser() {
     return browser;
 }
 
-// Health check
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
@@ -44,23 +42,22 @@ app.get('/health', (req, res) => {
     });
 });
 
-// Página principal
 app.get('/', (req, res) => {
     res.json({
         service: 'Philaxmed Multi-Agenda API',
-        version: '2.0.0',
+        version: '3.0.0',
         agendas: Object.keys(AGENDAS),
         endpoints: {
             health: '/health',
             especialidades: '/api/especialidades?agenda=kineyfisio',
             profesionales: '/api/profesionales?agenda=kineyfisio&especialidad=NOMBRE',
-            horas: '/api/horas?agenda=kineyfisio&especialidad=NOMBRE&profesional=NOMBRE&fecha=YYYY-MM-DD'
+            horas: '/api/horas?agenda=kineyfisio&profesional=ID&fecha=YYYY-MM-DD'
         },
         status: 'running'
     });
 });
 
-// Obtener especialidades disponibles
+// Obtener especialidades (botones)
 app.get('/api/especialidades', async (req, res) => {
     const { agenda } = req.query;
     
@@ -82,33 +79,57 @@ app.get('/api/especialidades', async (req, res) => {
             timeout: 60000
         });
         
-        // Esperar a que cargue el formulario
-        await page.waitForTimeout(3000);
+        // Esperar a que cargue el panel de especialidades
+        await page.waitForTimeout(5000);
         
-        // Extraer especialidades (Philaxmed usa diferentes selectores)
+        // Click en "Por Especialidad" si existe
+        try {
+            await page.waitForSelector('button:has-text("Por Especialidad"), .onlineBooking-tabButton', { timeout: 3000 });
+            const buttons = await page.$$('button');
+            for (const button of buttons) {
+                const text = await page.evaluate(el => el.textContent, button);
+                if (text.includes('Por Especialidad')) {
+                    await button.click();
+                    await page.waitForTimeout(2000);
+                    break;
+                }
+            }
+        } catch (e) {
+            console.log('No se encontró botón "Por Especialidad"');
+        }
+        
+        // Extraer especialidades de los botones
         const especialidades = await page.evaluate(() => {
-            const selectors = [
-                'select#cmbEspecialidad',
-                'select[name="especialidad"]',
-                '#especialidad',
-                'select.especialidad'
-            ];
+            const especialidadButtons = [];
             
-            let select = null;
-            for (const selector of selectors) {
-                select = document.querySelector(selector);
-                if (select) break;
+            // Buscar botones de especialidad
+            const buttons = document.querySelectorAll('button.gwt-Button, button[class*="specialty"], button[class*="especialidad"]');
+            
+            buttons.forEach(btn => {
+                const text = btn.textContent.trim();
+                if (text && text.length > 3 && !text.includes('Volver') && !text.includes('Buscar')) {
+                    especialidadButtons.push({
+                        text: text,
+                        value: text
+                    });
+                }
+            });
+            
+            // Si no encontró botones, buscar en divs
+            if (especialidadButtons.length === 0) {
+                const divs = document.querySelectorAll('div[class*="specialty"], div[class*="especialidad"]');
+                divs.forEach(div => {
+                    const text = div.textContent.trim();
+                    if (text && text.length > 3) {
+                        especialidadButtons.push({
+                            text: text,
+                            value: text
+                        });
+                    }
+                });
             }
             
-            if (!select) return [];
-            
-            const options = Array.from(select.options);
-            return options
-                .filter(opt => opt.value && opt.value !== '' && opt.value !== '0')
-                .map(opt => ({
-                    value: opt.value,
-                    text: opt.text.trim()
-                }));
+            return especialidadButtons;
         });
         
         await page.close();
@@ -128,7 +149,7 @@ app.get('/api/especialidades', async (req, res) => {
     }
 });
 
-// Obtener profesionales por especialidad
+// Obtener profesionales (tarjetas con fotos)
 app.get('/api/profesionales', async (req, res) => {
     const { agenda, especialidad } = req.query;
     
@@ -157,28 +178,35 @@ app.get('/api/profesionales', async (req, res) => {
             timeout: 60000
         });
         
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000);
         
-        // Seleccionar especialidad
-        const especialidadSelected = await page.evaluate((esp) => {
-            const selectors = [
-                'select#cmbEspecialidad',
-                'select[name="especialidad"]',
-                '#especialidad'
-            ];
-            
-            for (const selector of selectors) {
-                const select = document.querySelector(selector);
-                if (select) {
-                    select.value = esp;
-                    select.dispatchEvent(new Event('change', { bubbles: true }));
-                    return true;
+        // Click en "Por Especialidad"
+        try {
+            const buttons = await page.$$('button');
+            for (const button of buttons) {
+                const text = await page.evaluate(el => el.textContent, button);
+                if (text.includes('Por Especialidad')) {
+                    await button.click();
+                    await page.waitForTimeout(2000);
+                    break;
                 }
             }
-            return false;
-        }, especialidad);
+        } catch (e) {}
         
-        if (!especialidadSelected) {
+        // Click en la especialidad
+        const especialidadButtons = await page.$$('button');
+        let clicked = false;
+        for (const button of especialidadButtons) {
+            const text = await page.evaluate(el => el.textContent, button);
+            if (text.trim() === especialidad) {
+                await button.click();
+                await page.waitForTimeout(3000);
+                clicked = true;
+                break;
+            }
+        }
+        
+        if (!clicked) {
             await page.close();
             return res.json({
                 success: false,
@@ -186,33 +214,36 @@ app.get('/api/profesionales', async (req, res) => {
             });
         }
         
-        // Esperar a que carguen los profesionales
-        await page.waitForTimeout(3000);
-        
-        // Extraer profesionales
+        // Extraer profesionales de las tarjetas
         const profesionales = await page.evaluate(() => {
-            const selectors = [
-                'select#cmbProfesional',
-                'select[name="profesional"]',
-                '#profesional',
-                'select.profesional'
-            ];
+            const profesionalesData = [];
             
-            let select = null;
-            for (const selector of selectors) {
-                select = document.querySelector(selector);
-                if (select) break;
-            }
+            // Buscar tarjetas de profesionales
+            const cards = document.querySelectorAll('div[class*="agendaSelection"], div[class*="professional"], div[class*="especialista"]');
             
-            if (!select) return [];
+            cards.forEach((card, index) => {
+                const nombreEl = card.querySelector('div, span, p');
+                const especialidadEl = card.querySelectorAll('div, span, p')[1];
+                const cupoEl = card.querySelector('div:has-text("Próximo Cupo"), span:has-text("Próximo Cupo")');
+                
+                if (nombreEl) {
+                    const nombre = nombreEl.textContent.trim();
+                    const especialidadText = especialidadEl ? especialidadEl.textContent.trim() : '';
+                    const cupo = cupoEl ? cupoEl.textContent.trim() : '';
+                    
+                    if (nombre && nombre.length > 3) {
+                        profesionalesData.push({
+                            id: index,
+                            nombre: nombre,
+                            especialidad: especialidadText,
+                            proximo_cupo: cupo,
+                            value: nombre
+                        });
+                    }
+                }
+            });
             
-            const options = Array.from(select.options);
-            return options
-                .filter(opt => opt.value && opt.value !== '' && opt.value !== '0')
-                .map(opt => ({
-                    value: opt.value,
-                    text: opt.text.trim()
-                }));
+            return profesionalesData;
         });
         
         await page.close();
@@ -262,71 +293,75 @@ app.get('/api/horas', async (req, res) => {
             timeout: 60000
         });
         
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(5000);
         
-        // Seleccionar especialidad
-        await page.evaluate((esp) => {
-            const select = document.querySelector('select#cmbEspecialidad, select[name="especialidad"], #especialidad');
-            if (select) {
-                select.value = esp;
-                select.dispatchEvent(new Event('change', { bubbles: true }));
+        // Navegar: Por Especialidad -> Especialidad -> Profesional
+        try {
+            const buttons = await page.$$('button');
+            for (const button of buttons) {
+                const text = await page.evaluate(el => el.textContent, button);
+                if (text.includes('Por Especialidad')) {
+                    await button.click();
+                    await page.waitForTimeout(2000);
+                    break;
+                }
             }
-        }, especialidad);
+        } catch (e) {}
         
-        await page.waitForTimeout(3000);
-        
-        // Seleccionar profesional
-        await page.evaluate((prof) => {
-            const select = document.querySelector('select#cmbProfesional, select[name="profesional"], #profesional');
-            if (select) {
-                select.value = prof;
-                select.dispatchEvent(new Event('change', { bubbles: true }));
+        // Click en especialidad
+        const especialidadButtons = await page.$$('button');
+        for (const button of especialidadButtons) {
+            const text = await page.evaluate(el => el.textContent, button);
+            if (text.trim() === especialidad) {
+                await button.click();
+                await page.waitForTimeout(3000);
+                break;
             }
-        }, profesional);
+        }
         
-        await page.waitForTimeout(3000);
+        // Click en profesional (tarjeta)
+        const cards = await page.$$('div[class*="agendaSelection"]');
+        for (const card of cards) {
+            const text = await page.evaluate(el => el.textContent, card);
+            if (text.includes(profesional)) {
+                await card.click();
+                await page.waitForTimeout(3000);
+                break;
+            }
+        }
         
         // Si hay fecha, seleccionarla
         if (fecha) {
-            await page.evaluate((f) => {
-                const dateInput = document.querySelector('input[type="date"], input#txtFecha, input[name="fecha"]');
-                if (dateInput) {
-                    dateInput.value = f;
-                    dateInput.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            }, fecha);
-            await page.waitForTimeout(3000);
+            // Buscar selector de fecha
+            const dateSelectors = await page.$$('select, input[type="date"]');
+            if (dateSelectors.length > 0) {
+                // Implementar selección de fecha
+            }
         }
         
         // Extraer horas disponibles
         const horas = await page.evaluate(() => {
-            const horaElements = document.querySelectorAll(
-                'button.hora-disponible, .hora-btn, button[data-hora], div.time-slot, select#cmbHora option'
-            );
+            const horasData = [];
             
-            if (horaElements.length === 0) {
-                // Intentar con select de horas
-                const select = document.querySelector('select#cmbHora, select[name="hora"], #hora');
-                if (select) {
-                    const options = Array.from(select.options);
-                    return options
-                        .filter(opt => opt.value && opt.value !== '' && opt.value !== '0')
-                        .map(opt => ({
-                            hora: opt.text.trim(),
-                            value: opt.value,
-                            disponible: true
-                        }));
+            // Buscar botones de hora
+            const timeButtons = document.querySelectorAll('button, div[class*="time"]');
+            
+            timeButtons.forEach(btn => {
+                const text = btn.textContent.trim();
+                const isDisponible = text.includes('DISPONIBLE') || !text.includes('OCUPADO');
+                
+                // Extraer hora (formato HH:MM)
+                const horaMatch = text.match(/(\d{1,2}):(\d{2})/);
+                if (horaMatch) {
+                    horasData.push({
+                        hora: horaMatch[0],
+                        disponible: isDisponible,
+                        estado: text.includes('DISPONIBLE') ? 'DISPONIBLE' : 'OCUPADO'
+                    });
                 }
-            }
+            });
             
-            return Array.from(horaElements).map(el => {
-                const isButton = el.tagName === 'BUTTON';
-                return {
-                    hora: el.textContent.trim() || el.getAttribute('data-hora') || el.value,
-                    value: el.value || el.getAttribute('data-hora'),
-                    disponible: !el.classList.contains('disabled') && !el.disabled
-                };
-            }).filter(h => h.hora);
+            return horasData;
         });
         
         await page.close();
@@ -350,13 +385,11 @@ app.get('/api/horas', async (req, res) => {
     }
 });
 
-// Iniciar servidor
 app.listen(PORT, () => {
     console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
     console.log(`📋 Agendas disponibles: ${Object.keys(AGENDAS).join(', ')}`);
 });
 
-// Cerrar navegador al terminar
 process.on('SIGINT', async () => {
     if (browser) {
         await browser.close();
