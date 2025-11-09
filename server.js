@@ -10,6 +10,9 @@ app.use(cors());
 app.use(express.json());
 
 let browser = null;
+let requestCount = 0;
+let isProcessing = false;
+const requestQueue = [];
 
 const AGENDAS = {
     kineyfisio: 'https://web.philaxmed.cl/ReservaOnline.html?mc=kineyfisio#_',
@@ -17,10 +20,31 @@ const AGENDAS = {
 };
 
 async function getBrowser() {
+    // Reiniciar navegador cada 10 peticiones para liberar memoria
+    if (browser && requestCount > 10) {
+        console.log('🔄 Reiniciando navegador para liberar memoria...');
+        try {
+            await browser.close();
+        } catch (e) {
+            console.error('Error al cerrar navegador:', e);
+        }
+        browser = null;
+        requestCount = 0;
+    }
+
     if (!browser) {
         try {
+            console.log('🚀 Iniciando navegador...');
             browser = await puppeteerCore.launch({
-                args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox'],
+                args: [
+                    ...chromium.args,
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--single-process',
+                    '--no-zygote'
+                ],
                 defaultViewport: chromium.defaultViewport,
                 executablePath: await chromium.executablePath(),
                 headless: chromium.headless,
@@ -34,18 +58,46 @@ async function getBrowser() {
     return browser;
 }
 
+// Sistema de cola para evitar peticiones simultáneas
+async function processQueue() {
+    if (isProcessing || requestQueue.length === 0) return;
+    
+    isProcessing = true;
+    const { handler, resolve, reject } = requestQueue.shift();
+    
+    try {
+        const result = await handler();
+        resolve(result);
+    } catch (error) {
+        reject(error);
+    } finally {
+        isProcessing = false;
+        // Procesar siguiente petición después de 1 segundo
+        setTimeout(processQueue, 1000);
+    }
+}
+
+function queueRequest(handler) {
+    return new Promise((resolve, reject) => {
+        requestQueue.push({ handler, resolve, reject });
+        processQueue();
+    });
+}
+
 app.get('/health', (req, res) => {
     res.json({ 
         status: 'ok', 
         timestamp: new Date().toISOString(),
-        service: 'Philaxmed Multi-Agenda Automation'
+        service: 'Philaxmed Multi-Agenda Automation',
+        requestCount: requestCount,
+        queueLength: requestQueue.length
     });
 });
 
 app.get('/', (req, res) => {
     res.json({
         service: 'Philaxmed Multi-Agenda API',
-        version: '4.0.0',
+        version: '4.1.0',
         agendas: Object.keys(AGENDAS),
         endpoints: {
             health: '/health',
@@ -53,7 +105,8 @@ app.get('/', (req, res) => {
             profesionales: '/api/profesionales?agenda=kineyfisio&especialidad=KINESIOLOGÍA',
             horas: '/api/horas?agenda=kineyfisio&especialidad=KINESIOLOGÍA&profesional=NOMBRE'
         },
-        status: 'running'
+        status: 'running',
+        queue: requestQueue.length
     });
 });
 
@@ -69,66 +122,70 @@ app.get('/api/especialidades', async (req, res) => {
     }
     
     try {
-        console.log(`📋 Obteniendo especialidades de ${agenda}...`);
-        
-        const browserInstance = await getBrowser();
-        const page = await browserInstance.newPage();
-        
-        await page.goto(AGENDAS[agenda], {
-            waitUntil: 'networkidle2',
-            timeout: 60000
-        });
-        
-        await page.waitForTimeout(5000);
-        
-        // Click en "Reservar Hora"
-        await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const reservarBtn = buttons.find(btn => btn.textContent.includes('Reservar Hora'));
-            if (reservarBtn) reservarBtn.click();
-        });
-        
-        await page.waitForTimeout(3000);
-        
-        // Click en "Por Especialidad"
-        await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const especialidadBtn = buttons.find(btn => btn.textContent.includes('Por Especialidad'));
-            if (especialidadBtn) especialidadBtn.click();
-        });
-        
-        await page.waitForTimeout(5000);
-        
-        // Extraer especialidades de div.cellWidget
-        const especialidades = await page.evaluate(() => {
-            const especialidadesData = [];
-            const cellWidgets = Array.from(document.querySelectorAll('.cellWidget'));
+        const result = await queueRequest(async () => {
+            console.log(`📋 Obteniendo especialidades de ${agenda}...`);
             
-            cellWidgets.forEach(cell => {
-                const text = cell.textContent.trim();
-                const title = cell.getAttribute('title');
+            const browserInstance = await getBrowser();
+            const page = await browserInstance.newPage();
+            
+            try {
+                await page.goto(AGENDAS[agenda], {
+                    waitUntil: 'networkidle2',
+                    timeout: 60000
+                });
                 
-                if (text && text.length > 3) {
-                    especialidadesData.push({
-                        text: title || text,
-                        value: title || text
+                await page.waitForTimeout(5000);
+                
+                await page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const reservarBtn = buttons.find(btn => btn.textContent.includes('Reservar Hora'));
+                    if (reservarBtn) reservarBtn.click();
+                });
+                
+                await page.waitForTimeout(3000);
+                
+                await page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const especialidadBtn = buttons.find(btn => btn.textContent.includes('Por Especialidad'));
+                    if (especialidadBtn) especialidadBtn.click();
+                });
+                
+                await page.waitForTimeout(5000);
+                
+                const especialidades = await page.evaluate(() => {
+                    const especialidadesData = [];
+                    const cellWidgets = Array.from(document.querySelectorAll('.cellWidget'));
+                    
+                    cellWidgets.forEach(cell => {
+                        const text = cell.textContent.trim();
+                        const title = cell.getAttribute('title');
+                        
+                        if (text && text.length > 3) {
+                            especialidadesData.push({
+                                text: title || text,
+                                value: title || text
+                            });
+                        }
                     });
-                }
-            });
-            
-            return especialidadesData;
+                    
+                    return especialidadesData;
+                });
+                
+                requestCount++;
+                console.log(`✅ Encontradas ${especialidades.length} especialidades`);
+                
+                return {
+                    success: true,
+                    agenda: agenda,
+                    total: especialidades.length,
+                    especialidades: especialidades
+                };
+            } finally {
+                await page.close();
+            }
         });
         
-        await page.close();
-        
-        console.log(`✅ Encontradas ${especialidades.length} especialidades`);
-        
-        res.json({
-            success: true,
-            agenda: agenda,
-            total: especialidades.length,
-            especialidades: especialidades
-        });
+        res.json(result);
         
     } catch (error) {
         console.error('❌ Error al obtener especialidades:', error);
@@ -158,102 +215,105 @@ app.get('/api/profesionales', async (req, res) => {
     }
     
     try {
-        console.log(`👨‍⚕️ Obteniendo profesionales de ${agenda} para: ${especialidad}`);
-        
-        const browserInstance = await getBrowser();
-        const page = await browserInstance.newPage();
-        
-        await page.goto(AGENDAS[agenda], {
-            waitUntil: 'networkidle2',
-            timeout: 60000
-        });
-        
-        await page.waitForTimeout(5000);
-        
-        // Navegar hasta especialidad
-        await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const reservarBtn = buttons.find(btn => btn.textContent.includes('Reservar Hora'));
-            if (reservarBtn) reservarBtn.click();
-        });
-        
-        await page.waitForTimeout(3000);
-        
-        await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const especialidadBtn = buttons.find(btn => btn.textContent.includes('Por Especialidad'));
-            if (especialidadBtn) especialidadBtn.click();
-        });
-        
-        await page.waitForTimeout(5000);
-        
-        // Click en especialidad
-        console.log(`🔘 Seleccionando especialidad: ${especialidad}`);
-        const clickedEspecialidad = await page.evaluate((esp) => {
-            const cellWidgets = Array.from(document.querySelectorAll('.cellWidget'));
-            const especialidadCell = cellWidgets.find(cell => {
-                const title = cell.getAttribute('title');
-                const text = cell.textContent.trim();
-                return title === esp || text === esp;
-            });
+        const result = await queueRequest(async () => {
+            console.log(`👨‍⚕️ Obteniendo profesionales de ${agenda} para: ${especialidad}`);
             
-            if (especialidadCell) {
-                especialidadCell.click();
-                return true;
-            }
-            return false;
-        }, especialidad);
-        
-        if (!clickedEspecialidad) {
-            await page.close();
-            return res.json({
-                success: false,
-                error: 'No se pudo seleccionar la especialidad'
-            });
-        }
-        
-        await page.waitForTimeout(5000);
-        
-        // Extraer profesionales
-        console.log('👨‍⚕️ Extrayendo profesionales...');
-        const profesionales = await page.evaluate(() => {
-            const profesionalesData = [];
-            const bodyText = document.body.innerText;
-            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+            const browserInstance = await getBrowser();
+            const page = await browserInstance.newPage();
             
-            for (let i = 0; i < lines.length; i++) {
-                if (lines[i].startsWith('Especialidad:')) {
-                    const nombre = lines[i - 1] || '';
-                    const especialidad = lines[i].replace('Especialidad:', '').trim();
-                    const sucursal = lines[i + 1]?.startsWith('Sucursal:') ? lines[i + 1].replace('Sucursal:', '').trim() : '';
-                    const proximoCupo = lines[i + 2]?.startsWith('Próximo Cupo:') ? lines[i + 2].replace('Próximo Cupo:', '').trim() : '';
+            try {
+                await page.goto(AGENDAS[agenda], {
+                    waitUntil: 'networkidle2',
+                    timeout: 60000
+                });
+                
+                await page.waitForTimeout(5000);
+                
+                await page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const reservarBtn = buttons.find(btn => btn.textContent.includes('Reservar Hora'));
+                    if (reservarBtn) reservarBtn.click();
+                });
+                
+                await page.waitForTimeout(3000);
+                
+                await page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const especialidadBtn = buttons.find(btn => btn.textContent.includes('Por Especialidad'));
+                    if (especialidadBtn) especialidadBtn.click();
+                });
+                
+                await page.waitForTimeout(5000);
+                
+                console.log(`🔘 Seleccionando especialidad: ${especialidad}`);
+                const clickedEspecialidad = await page.evaluate((esp) => {
+                    const cellWidgets = Array.from(document.querySelectorAll('.cellWidget'));
+                    const especialidadCell = cellWidgets.find(cell => {
+                        const title = cell.getAttribute('title');
+                        const text = cell.textContent.trim();
+                        return title === esp || text === esp;
+                    });
                     
-                    if (nombre && nombre.length > 3 && !nombre.includes('Especialidad') && !nombre.includes('Seleccione')) {
-                        profesionalesData.push({
-                            nombre: nombre,
-                            especialidad: especialidad,
-                            sucursal: sucursal,
-                            proximo_cupo: proximoCupo,
-                            value: nombre
-                        });
+                    if (especialidadCell) {
+                        especialidadCell.click();
+                        return true;
                     }
+                    return false;
+                }, especialidad);
+                
+                if (!clickedEspecialidad) {
+                    return {
+                        success: false,
+                        error: 'No se pudo seleccionar la especialidad'
+                    };
                 }
+                
+                await page.waitForTimeout(5000);
+                
+                console.log('👨‍⚕️ Extrayendo profesionales...');
+                const profesionales = await page.evaluate(() => {
+                    const profesionalesData = [];
+                    const bodyText = document.body.innerText;
+                    const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+                    
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i].startsWith('Especialidad:')) {
+                            const nombre = lines[i - 1] || '';
+                            const especialidad = lines[i].replace('Especialidad:', '').trim();
+                            const sucursal = lines[i + 1]?.startsWith('Sucursal:') ? lines[i + 1].replace('Sucursal:', '').trim() : '';
+                            const proximoCupo = lines[i + 2]?.startsWith('Próximo Cupo:') ? lines[i + 2].replace('Próximo Cupo:', '').trim() : '';
+                            
+                            if (nombre && nombre.length > 3 && !nombre.includes('Especialidad') && !nombre.includes('Seleccione')) {
+                                profesionalesData.push({
+                                    nombre: nombre,
+                                    especialidad: especialidad,
+                                    sucursal: sucursal,
+                                    proximo_cupo: proximoCupo,
+                                    value: nombre
+                                });
+                            }
+                        }
+                    }
+                    
+                    return profesionalesData;
+                });
+                
+                requestCount++;
+                console.log(`✅ Encontrados ${profesionales.length} profesionales`);
+                
+                return {
+                    success: true,
+                    agenda: agenda,
+                    especialidad: especialidad,
+                    total: profesionales.length,
+                    profesionales: profesionales
+                };
+            } finally {
+                await page.close();
             }
-            
-            return profesionalesData;
         });
         
-        await page.close();
-        
-        console.log(`✅ Encontrados ${profesionales.length} profesionales`);
-        
-        res.json({
-            success: true,
-            agenda: agenda,
-            especialidad: especialidad,
-            total: profesionales.length,
-            profesionales: profesionales
-        });
+        res.json(result);
         
     } catch (error) {
         console.error('❌ Error al obtener profesionales:', error);
@@ -283,122 +343,122 @@ app.get('/api/horas', async (req, res) => {
     }
     
     try {
-        console.log(`📅 Obteniendo horas de ${agenda} para: ${profesional}`);
-        
-        const browserInstance = await getBrowser();
-        const page = await browserInstance.newPage();
-        
-        await page.goto(AGENDAS[agenda], {
-            waitUntil: 'networkidle2',
-            timeout: 60000
-        });
-        
-        await page.waitForTimeout(5000);
-        
-        // Navegar hasta profesional
-        await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const reservarBtn = buttons.find(btn => btn.textContent.includes('Reservar Hora'));
-            if (reservarBtn) reservarBtn.click();
-        });
-        
-        await page.waitForTimeout(3000);
-        
-        await page.evaluate(() => {
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const especialidadBtn = buttons.find(btn => btn.textContent.includes('Por Especialidad'));
-            if (especialidadBtn) especialidadBtn.click();
-        });
-        
-        await page.waitForTimeout(5000);
-        
-        await page.evaluate((esp) => {
-            const cellWidgets = Array.from(document.querySelectorAll('.cellWidget'));
-            const especialidadCell = cellWidgets.find(cell => {
-                const title = cell.getAttribute('title');
-                const text = cell.textContent.trim();
-                return title === esp || text === esp;
-            });
-            if (especialidadCell) especialidadCell.click();
-        }, especialidad);
-        
-        await page.waitForTimeout(5000);
-        
-        // Click en profesional
-        console.log(`🔘 Seleccionando profesional: ${profesional}`);
-        const clickedProfesional = await page.evaluate((prof) => {
-            const bodyText = document.body.innerText;
-            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+        const result = await queueRequest(async () => {
+            console.log(`📅 Obteniendo horas de ${agenda} para: ${profesional}`);
             
-            // Buscar el índice del profesional
-            const profIndex = lines.findIndex(line => line === prof);
+            const browserInstance = await getBrowser();
+            const page = await browserInstance.newPage();
             
-            if (profIndex !== -1) {
-                // Buscar el elemento clickeable
-                const allDivs = Array.from(document.querySelectorAll('div'));
-                const profesionalDiv = allDivs.find(div => 
-                    div.textContent.includes(prof) && 
-                    div.textContent.includes('Especialidad:')
-                );
+            try {
+                await page.goto(AGENDAS[agenda], {
+                    waitUntil: 'networkidle2',
+                    timeout: 60000
+                });
                 
-                if (profesionalDiv) {
-                    profesionalDiv.click();
-                    return true;
-                }
-            }
-            return false;
-        }, profesional);
-        
-        if (!clickedProfesional) {
-            await page.close();
-            return res.json({
-                success: false,
-                error: 'No se pudo seleccionar el profesional'
-            });
-        }
-        
-        await page.waitForTimeout(5000);
-        
-        // Extraer horas disponibles
-        console.log('🕐 Extrayendo horas...');
-        const horas = await page.evaluate(() => {
-            const horasData = [];
-            const bodyText = document.body.innerText;
-            const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
-            
-            lines.forEach(line => {
-                // Buscar formato HH:MM seguido de DISPONIBLE u OCUPADO
-                const match = line.match(/(\d{1,2}):(\d{2})\s*(DISPONIBLE|OCUPADO)?/);
-                if (match) {
-                    const hora = match[1] + ':' + match[2];
-                    const disponible = line.includes('DISPONIBLE') || (!line.includes('OCUPADO') && match[3] !== 'OCUPADO');
-                    
-                    horasData.push({
-                        hora: hora,
-                        disponible: disponible,
-                        estado: line.includes('DISPONIBLE') ? 'DISPONIBLE' : (line.includes('OCUPADO') ? 'OCUPADO' : 'DESCONOCIDO')
+                await page.waitForTimeout(5000);
+                
+                await page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const reservarBtn = buttons.find(btn => btn.textContent.includes('Reservar Hora'));
+                    if (reservarBtn) reservarBtn.click();
+                });
+                
+                await page.waitForTimeout(3000);
+                
+                await page.evaluate(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const especialidadBtn = buttons.find(btn => btn.textContent.includes('Por Especialidad'));
+                    if (especialidadBtn) especialidadBtn.click();
+                });
+                
+                await page.waitForTimeout(5000);
+                
+                await page.evaluate((esp) => {
+                    const cellWidgets = Array.from(document.querySelectorAll('.cellWidget'));
+                    const especialidadCell = cellWidgets.find(cell => {
+                        const title = cell.getAttribute('title');
+                        const text = cell.textContent.trim();
+                        return title === esp || text === esp;
                     });
+                    if (especialidadCell) especialidadCell.click();
+                }, especialidad);
+                
+                await page.waitForTimeout(5000);
+                
+                console.log(`🔘 Seleccionando profesional: ${profesional}`);
+                const clickedProfesional = await page.evaluate((prof) => {
+                    const bodyText = document.body.innerText;
+                    const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+                    
+                    const profIndex = lines.findIndex(line => line === prof);
+                    
+                    if (profIndex !== -1) {
+                        const allDivs = Array.from(document.querySelectorAll('div'));
+                        const profesionalDiv = allDivs.find(div => 
+                            div.textContent.includes(prof) && 
+                            div.textContent.includes('Especialidad:')
+                        );
+                        
+                        if (profesionalDiv) {
+                            profesionalDiv.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }, profesional);
+                
+                if (!clickedProfesional) {
+                    return {
+                        success: false,
+                        error: 'No se pudo seleccionar el profesional'
+                    };
                 }
-            });
-            
-            return horasData;
+                
+                await page.waitForTimeout(5000);
+                
+                console.log('🕐 Extrayendo horas...');
+                const horas = await page.evaluate(() => {
+                    const horasData = [];
+                    const bodyText = document.body.innerText;
+                    const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+                    
+                    lines.forEach(line => {
+                        const match = line.match(/(\d{1,2}):(\d{2})\s*(DISPONIBLE|OCUPADO)?/);
+                        if (match) {
+                            const hora = match[1] + ':' + match[2];
+                            const disponible = line.includes('DISPONIBLE') || (!line.includes('OCUPADO') && match[3] !== 'OCUPADO');
+                            
+                            horasData.push({
+                                hora: hora,
+                                disponible: disponible,
+                                estado: line.includes('DISPONIBLE') ? 'DISPONIBLE' : (line.includes('OCUPADO') ? 'OCUPADO' : 'DESCONOCIDO')
+                            });
+                        }
+                    });
+                    
+                    return horasData;
+                });
+                
+                const horasDisponibles = horas.filter(h => h.disponible);
+                
+                requestCount++;
+                console.log(`✅ Encontradas ${horasDisponibles.length} horas disponibles`);
+                
+                return {
+                    success: true,
+                    agenda: agenda,
+                    especialidad: especialidad,
+                    profesional: profesional,
+                    fecha: fecha || new Date().toISOString().split('T')[0],
+                    horas: horasDisponibles,
+                    total: horasDisponibles.length
+                };
+            } finally {
+                await page.close();
+            }
         });
         
-        await page.close();
-        
-        const horasDisponibles = horas.filter(h => h.disponible);
-        
-        console.log(`✅ Encontradas ${horasDisponibles.length} horas disponibles`);
-        
-        res.json({
-            success: true,
-            agenda: agenda,
-            especialidad: especialidad,
-            profesional: profesional,
-            fecha: fecha || new Date().toISOString().split('T')[0],
-            horas: horasDisponibles,
-            total: horasDisponibles.length
-        });
+        res.json(result);
         
     } catch (error) {
         console.error('❌ Error al obtener horas:', error);
