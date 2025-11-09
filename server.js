@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
+const puppeteerCore = require('puppeteer-core');
 const chromium = require('@sparticuz/chromium');
 
 const app = express();
@@ -11,17 +11,19 @@ app.use(express.json());
 
 let browser = null;
 
-// Función para obtener el navegador
+// URL de Philaxmed - REEMPLAZA CON TU URL REAL
+const PHILAXMED_URL = 'https://kinefisio.cl/reserva-de-horas/'; // 👈 CAMBIA ESTO
+
 async function getBrowser() {
     if (!browser) {
         try {
-            browser = await puppeteer.launch({
+            browser = await puppeteerCore.launch({
                 args: chromium.args,
                 defaultViewport: chromium.defaultViewport,
                 executablePath: await chromium.executablePath(),
                 headless: chromium.headless,
             });
-            console.log('✅ Navegador iniciado correctamente');
+            console.log('✅ Navegador iniciado');
         } catch (error) {
             console.error('❌ Error al iniciar navegador:', error);
             throw error;
@@ -43,19 +45,68 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
     res.json({
         service: 'Philaxmed Automation API',
-        version: '1.0.0',
+        version: '2.0.0',
         endpoints: {
             health: '/health',
-            obtenerHoras: '/api/horas?especialidad=NOMBRE&fecha=YYYY-MM-DD',
-            realizarReserva: '/api/reservar (POST)'
+            especialidades: '/api/especialidades',
+            profesionales: '/api/profesionales?especialidad=NOMBRE',
+            horas: '/api/horas?especialidad=NOMBRE&profesional=NOMBRE&fecha=YYYY-MM-DD'
         },
         status: 'running'
     });
 });
 
-// Endpoint para obtener horas disponibles
-app.get('/api/horas', async (req, res) => {
-    const { especialidad, fecha } = req.query;
+// Obtener especialidades disponibles
+app.get('/api/especialidades', async (req, res) => {
+    try {
+        console.log('📋 Obteniendo especialidades...');
+        
+        const browserInstance = await getBrowser();
+        const page = await browserInstance.newPage();
+        
+        await page.goto(PHILAXMED_URL, {
+            waitUntil: 'networkidle2',
+            timeout: 60000
+        });
+        
+        // Esperar a que cargue el selector de especialidades
+        await page.waitForSelector('select[name="especialidad"], #especialidad, select.especialidad', {
+            timeout: 10000
+        });
+        
+        // Extraer especialidades
+        const especialidades = await page.evaluate(() => {
+            const select = document.querySelector('select[name="especialidad"], #especialidad, select.especialidad');
+            if (!select) return [];
+            
+            const options = Array.from(select.options);
+            return options
+                .filter(opt => opt.value && opt.value !== '')
+                .map(opt => ({
+                    value: opt.value,
+                    text: opt.text.trim()
+                }));
+        });
+        
+        await page.close();
+        
+        res.json({
+            success: true,
+            especialidades: especialidades
+        });
+        
+    } catch (error) {
+        console.error('❌ Error al obtener especialidades:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Obtener profesionales por especialidad
+app.get('/api/profesionales', async (req, res) => {
+    const { especialidad } = req.query;
     
     if (!especialidad) {
         return res.status(400).json({
@@ -65,40 +116,137 @@ app.get('/api/horas', async (req, res) => {
     }
     
     try {
-        console.log(`📅 Obteniendo horas para: ${especialidad} - ${fecha || 'hoy'}`);
+        console.log(`👨‍⚕️ Obteniendo profesionales para: ${especialidad}`);
         
         const browserInstance = await getBrowser();
         const page = await browserInstance.newPage();
         
-        // Configurar timeout
-        await page.setDefaultNavigationTimeout(60000);
-        
-        // Ir a Philaxmed
-        await page.goto('https://philaxmed.cl/reserva-de-horas/', {
-            waitUntil: 'networkidle2'
+        await page.goto(PHILAXMED_URL, {
+            waitUntil: 'networkidle2',
+            timeout: 60000
         });
         
-        console.log('✅ Página cargada');
+        // Seleccionar especialidad
+        await page.waitForSelector('select[name="especialidad"], #especialidad, select.especialidad');
+        await page.select('select[name="especialidad"], #especialidad, select.especialidad', especialidad);
         
-        // Aquí iría el scraping real de Philaxmed
-        // Por ahora, devolvemos datos de ejemplo
-        const horasDisponibles = [
-            { hora: '09:00', disponible: true },
-            { hora: '10:00', disponible: true },
-            { hora: '11:00', disponible: true },
-            { hora: '14:00', disponible: true },
-            { hora: '15:00', disponible: true },
-            { hora: '16:00', disponible: true }
-        ];
+        // Esperar a que carguen los profesionales
+        await page.waitForTimeout(2000);
+        await page.waitForSelector('select[name="profesional"], #profesional, select.profesional', {
+            timeout: 10000
+        });
+        
+        // Extraer profesionales
+        const profesionales = await page.evaluate(() => {
+            const select = document.querySelector('select[name="profesional"], #profesional, select.profesional');
+            if (!select) return [];
+            
+            const options = Array.from(select.options);
+            return options
+                .filter(opt => opt.value && opt.value !== '')
+                .map(opt => ({
+                    value: opt.value,
+                    text: opt.text.trim()
+                }));
+        });
         
         await page.close();
         
         res.json({
             success: true,
             especialidad: especialidad,
+            profesionales: profesionales
+        });
+        
+    } catch (error) {
+        console.error('❌ Error al obtener profesionales:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Obtener horas disponibles
+app.get('/api/horas', async (req, res) => {
+    const { especialidad, profesional, fecha } = req.query;
+    
+    if (!especialidad || !profesional) {
+        return res.status(400).json({
+            success: false,
+            error: 'Especialidad y profesional son requeridos'
+        });
+    }
+    
+    try {
+        console.log(`📅 Obteniendo horas para: ${profesional} - ${fecha || 'hoy'}`);
+        
+        const browserInstance = await getBrowser();
+        const page = await browserInstance.newPage();
+        
+        await page.goto(PHILAXMED_URL, {
+            waitUntil: 'networkidle2',
+            timeout: 60000
+        });
+        
+        // Seleccionar especialidad
+        await page.waitForSelector('select[name="especialidad"], #especialidad, select.especialidad');
+        await page.select('select[name="especialidad"], #especialidad, select.especialidad', especialidad);
+        
+        await page.waitForTimeout(2000);
+        
+        // Seleccionar profesional
+        await page.waitForSelector('select[name="profesional"], #profesional, select.profesional');
+        await page.select('select[name="profesional"], #profesional, select.profesional', profesional);
+        
+        await page.waitForTimeout(2000);
+        
+        // Si hay fecha, seleccionarla
+        if (fecha) {
+            const dateInput = await page.$('input[type="date"], input[name="fecha"], #fecha');
+            if (dateInput) {
+                await dateInput.click({ clickCount: 3 });
+                await dateInput.type(fecha);
+            }
+            await page.waitForTimeout(2000);
+        }
+        
+        // Extraer horas disponibles
+        const horas = await page.evaluate(() => {
+            // Buscar botones, divs o elementos con horas
+            const horaElements = document.querySelectorAll(
+                '.hora-disponible, .hora, button[data-hora], div[data-hora], .time-slot'
+            );
+            
+            if (horaElements.length === 0) {
+                // Intentar con selectores alternativos
+                const select = document.querySelector('select[name="hora"], #hora, select.hora');
+                if (select) {
+                    const options = Array.from(select.options);
+                    return options
+                        .filter(opt => opt.value && opt.value !== '')
+                        .map(opt => ({
+                            hora: opt.text.trim(),
+                            disponible: true
+                        }));
+                }
+            }
+            
+            return Array.from(horaElements).map(el => ({
+                hora: el.textContent.trim() || el.getAttribute('data-hora'),
+                disponible: !el.classList.contains('disabled') && !el.disabled
+            })).filter(h => h.hora);
+        });
+        
+        await page.close();
+        
+        res.json({
+            success: true,
+            especialidad: especialidad,
+            profesional: profesional,
             fecha: fecha || new Date().toISOString().split('T')[0],
-            horas: horasDisponibles,
-            nota: 'Datos de ejemplo - scraping real en desarrollo'
+            horas: horas,
+            total: horas.length
         });
         
     } catch (error) {
@@ -110,65 +258,9 @@ app.get('/api/horas', async (req, res) => {
     }
 });
 
-// Endpoint para realizar reserva
-app.post('/api/reservar', async (req, res) => {
-    const { nombre, rut, email, telefono, especialidad, fecha, hora, comentarios } = req.body;
-    
-    // Validar campos requeridos
-    if (!nombre || !rut || !email || !telefono || !especialidad || !fecha || !hora) {
-        return res.status(400).json({
-            success: false,
-            error: 'Faltan campos requeridos'
-        });
-    }
-    
-    try {
-        console.log(`📝 Procesando reserva para: ${nombre}`);
-        
-        const browserInstance = await getBrowser();
-        const page = await browserInstance.newPage();
-        
-        await page.setDefaultNavigationTimeout(60000);
-        
-        // Ir a Philaxmed
-        await page.goto('https://philaxmed.cl/reserva-de-horas/', {
-            waitUntil: 'networkidle2'
-        });
-        
-        console.log('✅ Formulario cargado');
-        
-        // Aquí iría el proceso real de reserva
-        // Por ahora, simulamos éxito
-        
-        await page.close();
-        
-        const codigoConfirmacion = 'RES-' + Date.now().toString(36).toUpperCase();
-        
-        res.json({
-            success: true,
-            confirmacion: codigoConfirmacion,
-            mensaje: 'Reserva realizada exitosamente',
-            datos: {
-                nombre,
-                especialidad,
-                fecha,
-                hora
-            }
-        });
-        
-    } catch (error) {
-        console.error('❌ Error al realizar reserva:', error);
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
 // Iniciar servidor
 app.listen(PORT, () => {
     console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-    console.log(`📍 Health check: http://localhost:${PORT}/health`);
 });
 
 // Cerrar navegador al terminar
