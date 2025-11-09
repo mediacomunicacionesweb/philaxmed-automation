@@ -236,7 +236,7 @@ app.get('/api/especialidades', async (req, res) => {
                     waitUntil: 'domcontentloaded',
                     timeout: 60000
                 });
-                log('⏱ after goto (especialidades):', Date.now() - startTs, 'ms');
+                console.log(`⏱ after goto (especialidades): ${Date.now() - startTs} ms`);
 
                 // Esperar a que aparezca el botón o el contenedor con especialidades
                 // Preferimos selectores en lugar de sleeps
@@ -287,8 +287,11 @@ app.get('/api/especialidades', async (req, res) => {
                     return especialidadesData;
                 });
 
+                // Log raw para debugging desde Render
+                console.log('DEBUG especialidades raw', JSON.stringify(especialidades));
+
                 requestCount++;
-                log(`✅ Encontradas ${especialidades.length} especialidades - tiempo: ${Date.now() - startTs} ms`);
+                console.log(`✅ Encontradas ${especialidades.length} especialidades - tiempo: ${Date.now() - startTs} ms`);
 
                 return {
                     success: true,
@@ -344,7 +347,7 @@ app.get('/api/profesionales', async (req, res) => {
                     waitUntil: 'domcontentloaded',
                     timeout: 60000
                 });
-                log('⏱ after goto (profesionales):', Date.now() - startTs, 'ms');
+                console.log(`⏱ after goto (profesionales): ${Date.now() - startTs} ms`);
 
                 // Intentar clicks robustos
                 await clickButtonByText(page, 'reservar hora').catch(() => {});
@@ -375,7 +378,7 @@ app.get('/api/profesionales', async (req, res) => {
                 }
 
                 await page.waitForTimeout(1200);
-                log('⏱ after select especialidad:', Date.now() - startTs, 'ms');
+                console.log(`⏱ after select especialidad: ${Date.now() - startTs} ms`);
 
                 // Extraer profesionales desde DOM (más robusto)
                 const profesionales = await page.evaluate(() => {
@@ -425,8 +428,11 @@ app.get('/api/profesionales', async (req, res) => {
                     return unique;
                 });
 
+                // Log raw para debugging desde Render
+                console.log('DEBUG profesionales raw', JSON.stringify(profesionales));
+
                 requestCount++;
-                log(`✅ Encontrados ${profesionales.length} profesionales - tiempo: ${Date.now() - startTs} ms`);
+                console.log(`✅ Encontrados ${profesionales.length} profesionales - tiempo: ${Date.now() - startTs} ms`);
 
                 return {
                     success: true,
@@ -478,12 +484,31 @@ app.get('/api/horas', async (req, res) => {
             const browserInstance = await getBrowser();
             const page = await browserInstance.newPage();
 
+            // Interceptar responses XHR para logear JSON de horas (DEBUG horas raw)
+            page.on('response', async (response) => {
+                try {
+                    const req = response.request();
+                    if (req.resourceType && req.resourceType() === 'xhr') {
+                        const ct = (response.headers && response.headers()['content-type']) || '';
+                        if (ct && ct.includes('application/json')) {
+                            // filtrar por URL si sabes la ruta (opcional): if (response.url().includes('/ruta/horas')) { ... }
+                            const json = await response.json().catch(() => null);
+                            if (json) {
+                                console.log('DEBUG horas raw', JSON.stringify({ url: response.url(), body: json }));
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // no bloquear el flujo por errores de logging
+                }
+            });
+
             try {
                 await page.goto(AGENDAS[agenda], {
                     waitUntil: 'domcontentloaded',
                     timeout: 60000
                 });
-                log('⏱ after goto (horas):', Date.now() - startTs, 'ms');
+                console.log(`⏱ after goto (horas): ${Date.now() - startTs} ms`);
 
                 // Intentar clicks robustos
                 await clickButtonByText(page, 'reservar hora').catch(() => {});
@@ -514,7 +539,7 @@ app.get('/api/horas', async (req, res) => {
                 }
 
                 await page.waitForTimeout(1200);
-                log('⏱ after select especialidad (horas):', Date.now() - startTs, 'ms');
+                console.log(`⏱ after select especialidad (horas): ${Date.now() - startTs} ms`);
 
                 // Selección de profesional (robusta)
                 const profNorm = normalizeStringNode(profesional);
@@ -556,7 +581,7 @@ app.get('/api/horas', async (req, res) => {
                 }
 
                 await page.waitForTimeout(1200);
-                log('⏱ after select profesional:', Date.now() - startTs, 'ms');
+                console.log(`⏱ after select profesional: ${Date.now() - startTs} ms`);
 
                 // Extracción de horas (regex robusto)
                 const horas = await page.evaluate(() => {
@@ -597,7 +622,7 @@ app.get('/api/horas', async (req, res) => {
                 }
 
                 requestCount++;
-                log(`✅ Encontradas ${uniqueHoras.length} horas disponibles - tiempo total handler: ${Date.now() - startTs} ms`);
+                console.log(`✅ Encontradas ${uniqueHoras.length} horas disponibles - tiempo total handler: ${Date.now() - startTs} ms`);
 
                 return {
                     success: true,
