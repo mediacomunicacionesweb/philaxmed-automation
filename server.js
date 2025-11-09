@@ -1,13 +1,4 @@
-// server.js - Versión mejorada para Philaxmed Multi-Agenda Automation
-// Mejoras:
-// - Normalización de texto para matching (acentos, mayúsculas, espacios)
-// - Clicks robustos por texto mediante XPath y fallback
-// - Menos waitForTimeout fijos, uso de waitForSelector cuando es posible
-// - Logs con timestamps por etapa para detectar cuellos de botella
-// - Dedupe de horas y filtrado más robusto
-// - Reinicio del browser más frecuente para evitar OOM en Render
-// - Cola de peticiones con delay mayor entre peticiones para evitar saturación
-
+// server.js - Versión con diagnóstico A+B aplicado
 const express = require('express');
 const cors = require('cors');
 const puppeteerCore = require('puppeteer-core');
@@ -231,6 +222,19 @@ app.get('/api/especialidades', async (req, res) => {
             const browserInstance = await getBrowser();
             const page = await browserInstance.newPage();
 
+            // Set headers to mimic real browser
+            try {
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8' });
+                await page.setViewport({ width: 1200, height: 900 });
+            } catch (e) {}
+
+            // basic page listeners for debugging
+            page.on('console', msg => { try{ console.log('PAGE LOG>', msg.type(), msg.text()); }catch(e){} });
+            page.on('pageerror', err => { console.log('PAGE ERROR>', err && err.stack ? err.stack : String(err)); });
+            page.on('requestfailed', req => { const f = req.failure && req.failure(); console.log('REQUEST FAILED>', req.url(), f && f.errorText); });
+            page.on('request', req => { try { console.log('REQUEST>', req.method(), req.resourceType(), req.url()); } catch(e){} });
+
             try {
                 await page.goto(AGENDAS[agenda], {
                     waitUntil: 'domcontentloaded',
@@ -239,27 +243,19 @@ app.get('/api/especialidades', async (req, res) => {
                 console.log(`⏱ after goto (especialidades): ${Date.now() - startTs} ms`);
 
                 // Esperar a que aparezca el botón o el contenedor con especialidades
-                // Preferimos selectores en lugar de sleeps
                 try {
                     await page.waitForSelector('.cellWidget, .especialidad, .service-item', { timeout: 20000 });
-                } catch (e) {
-                    // fallback: intentar click en "Reservar Hora" si existe
-                }
+                } catch (e) {}
 
-                // Click en "Reservar Hora" de manera robusta (si existe)
                 await clickButtonByText(page, 'reservar hora').catch(() => {});
                 await page.waitForTimeout(600);
 
-                // Click en "Por Especialidad" robusto
                 await clickButtonByText(page, 'por especialidad').catch(() => {});
                 await page.waitForTimeout(800);
 
-                // Esperar contenedores de especialidades
                 try {
                     await page.waitForSelector('.cellWidget', { timeout: 20000 });
-                } catch (e) {
-                    // si no existe, seguimos (tal vez la página tenga otro layout)
-                }
+                } catch (e) {}
 
                 const especialidades = await page.evaluate(() => {
                     const especialidadesData = [];
@@ -274,10 +270,8 @@ app.get('/api/especialidades', async (req, res) => {
                             });
                         }
                     });
-                    // fallback: si no se encontraron, intentar leer líneas del body y filtrar
                     if (especialidadesData.length === 0) {
                         const lines = (document.body.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
-                        // heurística: líneas largas y sin palabras como 'Reservar' o 'Por Especialidad'
                         lines.forEach(l => {
                             if (l.length > 4 && !/reservar|especialidad|por especialidad/i.test(l)) {
                                 especialidadesData.push({ text: l, value: l });
@@ -287,7 +281,6 @@ app.get('/api/especialidades', async (req, res) => {
                     return especialidadesData;
                 });
 
-                // Log raw para debugging desde Render
                 console.log('DEBUG especialidades raw', JSON.stringify(especialidades));
 
                 requestCount++;
@@ -343,22 +336,30 @@ app.get('/api/profesionales', async (req, res) => {
             const page = await browserInstance.newPage();
 
             try {
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8' });
+                await page.setViewport({ width: 1200, height: 900 });
+            } catch (e) {}
+
+            page.on('console', msg => { try{ console.log('PAGE LOG>', msg.type(), msg.text()); }catch(e){} });
+            page.on('pageerror', err => { console.log('PAGE ERROR>', err && err.stack ? err.stack : String(err)); });
+            page.on('requestfailed', req => { const f = req.failure && req.failure(); console.log('REQUEST FAILED>', req.url(), f && f.errorText); });
+            page.on('request', req => { try { console.log('REQUEST>', req.method(), req.resourceType(), req.url()); } catch(e){} });
+
+            try {
                 await page.goto(AGENDAS[agenda], {
                     waitUntil: 'domcontentloaded',
                     timeout: 60000
                 });
                 console.log(`⏱ after goto (profesionales): ${Date.now() - startTs} ms`);
 
-                // Intentar clicks robustos
                 await clickButtonByText(page, 'reservar hora').catch(() => {});
                 await page.waitForTimeout(600);
                 await clickButtonByText(page, 'por especialidad').catch(() => {});
                 await page.waitForTimeout(800);
 
-                // Seleccionamos la especialidad (robusto)
                 const clickedEspecialidad = await clickElementInSelectorByText(page, '.cellWidget, .especialidad, .service-item', especialidad);
                 if (!clickedEspecialidad) {
-                    // intentar fallback por texto en todo el DOM
                     const tried = await page.evaluate((esp) => {
                         function n(s){ return String(s||'').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim().replace(/\s+/g,' '); }
                         const txt = n(esp);
@@ -380,13 +381,11 @@ app.get('/api/profesionales', async (req, res) => {
                 await page.waitForTimeout(1200);
                 console.log(`⏱ after select especialidad: ${Date.now() - startTs} ms`);
 
-                // Extraer profesionales desde DOM (más robusto)
                 const profesionales = await page.evaluate(() => {
                     const profesionalesData = [];
                     const bodyText = document.body.innerText || '';
                     const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
 
-                    // Buscamos patrones: Nombre seguido de "Especialidad:" o "Sucursal:" etc.
                     for (let i = 0; i < lines.length; i++) {
                         const line = lines[i];
                         if (/especialidad[:\s]/i.test(line) && i > 0) {
@@ -403,19 +402,16 @@ app.get('/api/profesionales', async (req, res) => {
                             }
                         }
                     }
-                    // fallback: si no se llenó, intentar extraer bloques más simples
                     if (profesionalesData.length === 0) {
                         const possible = Array.from(document.querySelectorAll('.profesional, .medico, .practitioner, .list-item, .item'));
                         possible.forEach(el => {
                             const txt = el.textContent || '';
                             if (txt && txt.length > 5) {
-                                // tomar la primer linea de texto como nombre
                                 const first = txt.split('\n').map(l=>l.trim()).filter(Boolean)[0] || txt;
                                 profesionalesData.push({ nombre: first, value: first });
                             }
                         });
                     }
-                    // dedupe by name
                     const seen = new Set();
                     const unique = [];
                     profesionalesData.forEach(p => {
@@ -428,7 +424,6 @@ app.get('/api/profesionales', async (req, res) => {
                     return unique;
                 });
 
-                // Log raw para debugging desde Render
                 console.log('DEBUG profesionales raw', JSON.stringify(profesionales));
 
                 requestCount++;
@@ -484,22 +479,62 @@ app.get('/api/horas', async (req, res) => {
             const browserInstance = await getBrowser();
             const page = await browserInstance.newPage();
 
-            // Interceptar responses XHR para logear JSON de horas (DEBUG horas raw)
+            // Set headers & viewport to mimic real browser
+            try {
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8' });
+                await page.setViewport({ width: 1200, height: 900 });
+            } catch (e) {}
+
+            // Keep last XHR response for possible JSON extraction
+            let lastXHR = null;
+
+            // Listeners for page debug
+            page.on('console', msg => { try{ console.log('PAGE LOG>', msg.type(), msg.text()); }catch(e){} });
+            page.on('pageerror', err => { console.log('PAGE ERROR>', err && err.stack ? err.stack : String(err)); });
+            page.on('requestfailed', req => { const f = req.failure && req.failure(); console.log('REQUEST FAILED>', req.url(), f && f.errorText); });
+            page.on('request', req => { try { console.log('REQUEST>', req.method(), req.resourceType(), req.url()); } catch(e){} });
+
+            // Enhanced response listener: try json, else text. mark interesting urls.
             page.on('response', async (response) => {
                 try {
                     const req = response.request();
-                    if (req.resourceType && req.resourceType() === 'xhr') {
-                        const ct = (response.headers && response.headers()['content-type']) || '';
-                        if (ct && ct.includes('application/json')) {
-                            // filtrar por URL si sabes la ruta (opcional): if (response.url().includes('/ruta/horas')) { ... }
-                            const json = await response.json().catch(() => null);
+                    const rtype = req.resourceType && req.resourceType();
+                    if (rtype === 'xhr' || rtype === 'fetch') {
+                        const url = response.url();
+                        const urlLow = url.toLowerCase();
+                        const interesting = /hora|horas|slot|available|availability|getavailable|reserva|agenda|timeslot|getslots|disponible/.test(urlLow);
+
+                        const headers = response.headers ? (response.headers()['content-type'] || response.headers()['Content-Type'] || '') : '';
+                        let json = null;
+                        if (headers && headers.toLowerCase().includes('application/json')) {
+                            json = await response.json().catch(() => null);
                             if (json) {
                                 console.log('DEBUG horas raw', JSON.stringify({ url: response.url(), body: json }));
+                                lastXHR = { url: response.url(), json: json, text: null };
                             }
+                        } else {
+                            // try json even if header missing
+                            json = await response.json().catch(() => null);
+                            if (json) {
+                                console.log('DEBUG horas raw (no-ct-json)', JSON.stringify({ url: response.url(), body: json }));
+                                lastXHR = { url: response.url(), json: json, text: null };
+                            } else {
+                                const txt = await response.text().catch(() => null);
+                                if (txt) {
+                                    // truncate very long responses in logs
+                                    const sample = txt.length > 10000 ? txt.slice(0, 10000) + '...[truncated]' : txt;
+                                    console.log('DEBUG horas raw-text', JSON.stringify({ url: response.url(), body: sample }));
+                                    lastXHR = { url: response.url(), json: null, text: sample };
+                                }
+                            }
+                        }
+                        if (interesting) {
+                            console.log('DEBUG horas url-match', response.url());
                         }
                     }
                 } catch (e) {
-                    // no bloquear el flujo por errores de logging
+                    // don't break the flow
                 }
             });
 
@@ -510,7 +545,6 @@ app.get('/api/horas', async (req, res) => {
                 });
                 console.log(`⏱ after goto (horas): ${Date.now() - startTs} ms`);
 
-                // Intentar clicks robustos
                 await clickButtonByText(page, 'reservar hora').catch(() => {});
                 await page.waitForTimeout(600);
                 await clickButtonByText(page, 'por especialidad').catch(() => {});
@@ -519,7 +553,6 @@ app.get('/api/horas', async (req, res) => {
                 // Seleccionar especialidad
                 let clickedEspecialidad = await clickElementInSelectorByText(page, '.cellWidget, .especialidad, .service-item', especialidad);
                 if (!clickedEspecialidad) {
-                    // fallback general
                     const tried = await page.evaluate((esp) => {
                         function n(s){ return String(s||'').normalize('NFD').replace(/\p{Diacritic}/gu,'').toLowerCase().trim().replace(/\s+/g,' '); }
                         const txt = n(esp);
@@ -551,7 +584,6 @@ app.get('/api/horas', async (req, res) => {
                     });
                     if (candidates.length === 0) return false;
 
-                    // prefer candidate that also contains "Especialidad" or "Sucursal" nearby
                     let chosen = candidates.find(c => /especialidad[:\s]/i.test(c.textContent)) || candidates[0];
                     try {
                         const clickable = chosen.querySelector('button, a') || chosen;
@@ -565,7 +597,6 @@ app.get('/api/horas', async (req, res) => {
 
                 if (!clickedProfesional) {
                     log('⚠️ No se pudo seleccionar el profesional por click directo. Intentando fallback por índice.');
-                    // fallback: intentar seleccionar primer profesional visible
                     const fallback = await page.evaluate(() => {
                         const all = Array.from(document.querySelectorAll('div, li, .list-item, .profesional, .medico'));
                         const el = all[0];
@@ -583,41 +614,92 @@ app.get('/api/horas', async (req, res) => {
                 await page.waitForTimeout(1200);
                 console.log(`⏱ after select profesional: ${Date.now() - startTs} ms`);
 
-                // Extracción de horas (regex robusto)
-                const horas = await page.evaluate(() => {
-                    const horasData = [];
-                    const bodyText = document.body.innerText || '';
-                    const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
-
-                    // regex que captura HH:MM y estado opcional
-                    const regex = /(?:^|\s)(\d{1,2}:\d{2})(?:\s*[-–—]?\s*(DISPONIBLE|OCUPADO|RESERVADO)?)?/i;
-
-                    for (const line of lines) {
-                        const m = line.match(regex);
-                        if (m) {
-                            const hora = m[1];
-                            const estadoRaw = (m[2] || '').toUpperCase();
-                            const estado = estadoRaw === 'OCUPADO' ? 'OCUPADO' : (estadoRaw === 'DISPONIBLE' ? 'DISPONIBLE' : 'DESCONOCIDO');
-                            const disponible = estado === 'DISPONIBLE' || (estado === 'DESCONOCIDO' && !/OCUPADO/i.test(line));
-                            horasData.push({
-                                hora: hora,
-                                disponible: disponible,
-                                estado: estado
-                            });
-                        }
+                // Si detectamos XHR JSON reciente, intentamos extraer horarios desde ahí primero
+                function findTimesInObject(o, results = []) {
+                    if (!o) return results;
+                    if (Array.isArray(o)) {
+                        o.forEach(item => {
+                            if (typeof item === 'string') {
+                                const m = item.match(/\d{1,2}:\d{2}/);
+                                if (m) results.push(m[0]);
+                            } else if (typeof item === 'object') {
+                                for (const k of ['time','hora','start','slot','hour','available','schedule','timeSlot','availableTime']) {
+                                    if (item[k]) {
+                                        if (typeof item[k] === 'string') {
+                                            const m = item[k].match(/\d{1,2}:\d{2}/);
+                                            if (m) results.push(m[0]);
+                                        }
+                                    }
+                                }
+                                findTimesInObject(item, results);
+                            }
+                        });
+                    } else if (typeof o === 'object') {
+                        Object.values(o).forEach(v => findTimesInObject(v, results));
                     }
-                    return horasData;
-                });
+                    return results;
+                }
 
-                // Filtrado y dedupe
-                const horasDisponibles = (horas || []).filter(h => h.disponible).map(h => ({ hora: h.hora, estado: h.estado }));
-                const seen = new Set();
-                const uniqueHoras = [];
-                for (const h of horasDisponibles) {
-                    const key = h.hora;
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        uniqueHoras.push(h);
+                let horasFromXHR = [];
+                if (lastXHR && lastXHR.json) {
+                    try {
+                        horasFromXHR = findTimesInObject(lastXHR.json, []);
+                        if (horasFromXHR && horasFromXHR.length > 0) {
+                            console.log('ℹ️ USING XHR JSON for horas, found', horasFromXHR.length);
+                        } else {
+                            // if no times found, still keep lastXHR.url for context
+                            console.log('ℹ️ lastXHR captured but no direct time strings found. lastXHR.url=', lastXHR.url);
+                        }
+                    } catch (e) {
+                        console.log('WARN: error processing lastXHR json', e && e.message);
+                    }
+                }
+
+                let uniqueHoras = [];
+
+                if (horasFromXHR && horasFromXHR.length > 0) {
+                    const seen = new Set();
+                    horasFromXHR.forEach(h => {
+                        const key = h;
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            uniqueHoras.push({ hora: key, estado: 'DESCONOCIDO' });
+                        }
+                    });
+                } else {
+                    // Extracción de horas (regex robusto) desde DOM como fallback
+                    const horas = await page.evaluate(() => {
+                        const horasData = [];
+                        const bodyText = document.body.innerText || '';
+                        const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+
+                        const regex = /(?:^|\s)(\d{1,2}:\d{2})(?:\s*[-–—]?\s*(DISPONIBLE|OCUPADO|RESERVADO)?)?/i;
+
+                        for (const line of lines) {
+                            const m = line.match(regex);
+                            if (m) {
+                                const hora = m[1];
+                                const estadoRaw = (m[2] || '').toUpperCase();
+                                const estado = estadoRaw === 'OCUPADO' ? 'OCUPADO' : (estadoRaw === 'DISPONIBLE' ? 'DISPONIBLE' : 'DESCONOCIDO');
+                                const disponible = estado === 'DISPONIBLE' || (estado === 'DESCONOCIDO' && !/OCUPADO/i.test(line));
+                                horasData.push({
+                                    hora: hora,
+                                    disponible: disponible,
+                                    estado: estado
+                                });
+                            }
+                        }
+                        return horasData;
+                    });
+
+                    const horasDisponibles = (horas || []).filter(h => h.disponible).map(h => ({ hora: h.hora, estado: h.estado }));
+                    const seen = new Set();
+                    for (const h of horasDisponibles) {
+                        const key = h.hora;
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            uniqueHoras.push(h);
+                        }
                     }
                 }
 
