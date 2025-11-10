@@ -1,6 +1,6 @@
-// server.js - Versión con diagnóstico + capture /onlineBooking/application + extended waits
-// Incluye campos "plain" para frontend: especialidades_list, especialidades_text,
-// profesionales_list, profesionales_text, horas_list, horas_text
+// server.js - Versión final: diagnóstico + capture /onlineBooking/application + extended waits
+// Claves principales devuelven arrays de strings (especialidades/profesionales/horas).
+// Objetos completos disponibles en *_objects.
 
 const express = require('express');
 const cors = require('cors');
@@ -288,8 +288,10 @@ app.get('/api/especialidades', async (req, res) => {
                     success: true,
                     agenda: agenda,
                     total: especialidades.length,
-                    especialidades: especialidades,
-                    especialidades_list: especialidades_list,
+                    // clave principal ahora contiene lista de strings (para frontends simples)
+                    especialidades: especialidades_list,
+                    // objetos completos disponibles en caso de que algún consumidor los necesite
+                    especialidades_objects: especialidades,
                     especialidades_text: especialidades_text
                 };
             } finally {
@@ -437,8 +439,9 @@ app.get('/api/profesionales', async (req, res) => {
                     agenda: agenda,
                     especialidad: especialidad,
                     total: profesionales.length,
-                    profesionales: profesionales,
-                    profesionales_list: profesionales_list,
+                    // lista simple para el frontend
+                    profesionales: profesionales_list,
+                    profesionales_objects: profesionales,
                     profesionales_text: profesionales_text
                 };
             } finally {
@@ -752,8 +755,9 @@ app.get('/api/horas', async (req, res) => {
                     especialidad: especialidad,
                     profesional: profesional,
                     fecha: fecha || new Date().toISOString().split('T')[0],
-                    horas: uniqueHoras,
-                    horas_list: horas_list,
+                    // claves primarias con listas simples para mostrar directamente en la UI
+                    horas: horas_list,
+                    horas_objects: uniqueHoras,
                     horas_text: horas_text,
                     total: uniqueHoras.length
                 };
