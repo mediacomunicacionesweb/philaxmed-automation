@@ -1,0 +1,23 @@
+*** Begin Patch
+*** Update File: server.js
+@@
+-                return {
+-                    success: true,
+-                    agenda: agenda,
+-                    total: especialidades.length,
+-                    especialidades: especialidades,
+-                    especialidades_list: especialidades_list,
+-                    especialidades_text: especialidades_text
+-                };
++                return {
++                    success: true,
++                    agenda: agenda,
++                    total: especialidades.length,
++                    // clave principal ahora contiene lista de strings (para frontends simples)
++                    especialidades: especialidades_list,
++                    // objetos completos disponibles en caso de que algún consumidor los necesite
++                    especialidades_objects: especialidades,
++                    especialidades_text: especialidades_text
++                };
+             };
+*** End Patch
