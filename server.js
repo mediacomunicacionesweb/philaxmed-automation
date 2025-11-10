@@ -1,4 +1,7 @@
-// server.js - Versión con diagnóstico A+B + capture /onlineBooking/application + waits extendidos
+// server.js - Versión con diagnóstico + capture /onlineBooking/application + extended waits
+// Incluye campos "plain" para frontend: especialidades_list, especialidades_text,
+// profesionales_list, profesionales_text, horas_list, horas_text
+
 const express = require('express');
 const cors = require('cors');
 const puppeteerCore = require('puppeteer-core');
@@ -274,6 +277,10 @@ app.get('/api/especialidades', async (req, res) => {
 
                 console.log('DEBUG especialidades raw', JSON.stringify(especialidades));
 
+                // Versión plana para frontends que esperan strings (evita "[object Object]")
+                const especialidades_list = especialidades.map(e => e.text || e.value || JSON.stringify(e));
+                const especialidades_text = especialidades_list.map((s, i) => `${i+1}. ${s}`).join('\n');
+
                 requestCount++;
                 console.log(`✅ Encontradas ${especialidades.length} especialidades - tiempo: ${Date.now() - startTs} ms`);
 
@@ -281,7 +288,9 @@ app.get('/api/especialidades', async (req, res) => {
                     success: true,
                     agenda: agenda,
                     total: especialidades.length,
-                    especialidades: especialidades
+                    especialidades: especialidades,
+                    especialidades_list: especialidades_list,
+                    especialidades_text: especialidades_text
                 };
             } finally {
                 try { await page.close(); } catch (e) {}
@@ -417,6 +426,9 @@ app.get('/api/profesionales', async (req, res) => {
 
                 console.log('DEBUG profesionales raw', JSON.stringify(profesionales));
 
+                const profesionales_list = profesionales.map(p => p.nombre || p.value || JSON.stringify(p));
+                const profesionales_text = profesionales_list.map((s, i) => `${i+1}. ${s}`).join('\n');
+
                 requestCount++;
                 console.log(`✅ Encontrados ${profesionales.length} profesionales - tiempo: ${Date.now() - startTs} ms`);
 
@@ -425,7 +437,9 @@ app.get('/api/profesionales', async (req, res) => {
                     agenda: agenda,
                     especialidad: especialidad,
                     total: profesionales.length,
-                    profesionales: profesionales
+                    profesionales: profesionales,
+                    profesionales_list: profesionales_list,
+                    profesionales_text: profesionales_text
                 };
             } finally {
                 try { await page.close(); } catch (e) {}
@@ -566,7 +580,7 @@ app.get('/api/horas', async (req, res) => {
                         const el = all.find(e => n(e.textContent || '').includes(txt));
                         if (el) {
                             const clickable = el.querySelector('button, a') || el;
-                            clickable.scrollIntoView({behavior:'auto', block:'center'});
+                            clickable.scrollIntoView({behavior: 'auto', block:'center'});
                             clickable.click();
                             return true;
                         }
@@ -729,6 +743,9 @@ app.get('/api/horas', async (req, res) => {
                 requestCount++;
                 console.log(`✅ Encontradas ${uniqueHoras.length} horas disponibles - tiempo total handler: ${Date.now() - startTs} ms`);
 
+                const horas_list = uniqueHoras.map(h => h.hora || String(h));
+                const horas_text = horas_list.map((s,i) => `${i+1}. ${s}`).join('\n');
+
                 return {
                     success: true,
                     agenda: agenda,
@@ -736,6 +753,8 @@ app.get('/api/horas', async (req, res) => {
                     profesional: profesional,
                     fecha: fecha || new Date().toISOString().split('T')[0],
                     horas: uniqueHoras,
+                    horas_list: horas_list,
+                    horas_text: horas_text,
                     total: uniqueHoras.length
                 };
             } finally {
