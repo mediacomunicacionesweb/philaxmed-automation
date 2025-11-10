@@ -1,4 +1,4 @@
-// server.js - Versión con diagnóstico A+B + capture /onlineBooking/application
+// server.js - Versión con diagnóstico A+B + capture /onlineBooking/application + waits extendidos
 const express = require('express');
 const cors = require('cors');
 const puppeteerCore = require('puppeteer-core');
@@ -193,38 +193,61 @@ app.get('/', (req, res) => {
     });
 });
 
-// -------------------- ESPECIALIDADES / PROFESIONALES (idéntico a versión previa) --------------------
-// (omito cambios aquí por brevedad; mantén las mismas implementaciones que ya funcionan)
+// -------------------- ESPECIALIDADES --------------------
 
 app.get('/api/especialidades', async (req, res) => {
     const { agenda } = req.query;
+
     if (!agenda || !AGENDAS[agenda]) {
-        return res.status(400).json({ success: false, error: 'Agenda no válida. Opciones: ' + Object.keys(AGENDAS).join(', ') });
+        return res.status(400).json({
+            success: false,
+            error: 'Agenda no válida. Opciones: ' + Object.keys(AGENDAS).join(', ')
+        });
     }
+
     try {
         const result = await queueRequest(async () => {
             const startTs = Date.now();
             log(`📋 Obteniendo especialidades de ${agenda}...`);
+
             const browserInstance = await getBrowser();
             const page = await browserInstance.newPage();
+
+            // Set headers to mimic real browser
             try {
                 await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
                 await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8' });
                 await page.setViewport({ width: 1200, height: 900 });
             } catch (e) {}
+
+            // basic page listeners for debugging
             page.on('console', msg => { try{ console.log('PAGE LOG>', msg.type(), msg.text()); }catch(e){} });
             page.on('pageerror', err => { console.log('PAGE ERROR>', err && err.stack ? err.stack : String(err)); });
             page.on('requestfailed', req => { const f = req.failure && req.failure(); console.log('REQUEST FAILED>', req.url(), f && f.errorText); });
             page.on('request', req => { try { console.log('REQUEST>', req.method(), req.resourceType(), req.url()); } catch(e){} });
+
             try {
-                await page.goto(AGENDAS[agenda], { waitUntil: 'domcontentloaded', timeout: 60000 });
+                await page.goto(AGENDAS[agenda], {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 60000
+                });
                 console.log(`⏱ after goto (especialidades): ${Date.now() - startTs} ms`);
-                try { await page.waitForSelector('.cellWidget, .especialidad, .service-item', { timeout: 20000 }); } catch (e) {}
-                await clickButtonByText(page, 'reservar hora').catch(()=>{});
+
+                // Esperar a que aparezca el botón o el contenedor con especialidades
+                try {
+                    await page.waitForSelector('.cellWidget, .especialidad, .service-item', { timeout: 20000 });
+                } catch (e) {}
+
+                await clickButtonByText(page, 'reservar hora').catch(() => {});
                 await page.waitForTimeout(600);
-                await clickButtonByText(page, 'por especialidad').catch(()=>{});
+
+                await clickButtonByText(page, 'por especialidad').catch(() => {});
                 await page.waitForTimeout(800);
-                try { await page.waitForSelector('.cellWidget', { timeout: 20000 }); } catch (e) {}
+
+                try {
+                    await page.waitForSelector('.cellWidget', { timeout: 20000 });
+                } catch (e) {}
+
                 const especialidades = await page.evaluate(() => {
                     const especialidadesData = [];
                     const elems = Array.from(document.querySelectorAll('.cellWidget, .especialidad, .service-item, .item'));
@@ -232,7 +255,10 @@ app.get('/api/especialidades', async (req, res) => {
                         const text = (cell.textContent || '').trim();
                         const title = cell.getAttribute('title') || '';
                         if (text && text.length > 3) {
-                            especialidadesData.push({ text: title || text, value: title || text });
+                            especialidadesData.push({
+                                text: title || text,
+                                value: title || text
+                            });
                         }
                     });
                     if (especialidadesData.length === 0) {
@@ -245,48 +271,84 @@ app.get('/api/especialidades', async (req, res) => {
                     }
                     return especialidadesData;
                 });
+
                 console.log('DEBUG especialidades raw', JSON.stringify(especialidades));
+
                 requestCount++;
                 console.log(`✅ Encontradas ${especialidades.length} especialidades - tiempo: ${Date.now() - startTs} ms`);
-                return { success: true, agenda: agenda, total: especialidades.length, especialidades: especialidades };
+
+                return {
+                    success: true,
+                    agenda: agenda,
+                    total: especialidades.length,
+                    especialidades: especialidades
+                };
             } finally {
                 try { await page.close(); } catch (e) {}
             }
         });
+
         res.json(result);
+
     } catch (error) {
         console.error('❌ Error al obtener especialidades:', error);
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
     }
 });
 
+// -------------------- PROFESIONALES --------------------
+
 app.get('/api/profesionales', async (req, res) => {
     const { agenda, especialidad } = req.query;
-    if (!agenda || !AGENDAS[agenda]) return res.status(400).json({ success:false, error:'Agenda no válida' });
-    if (!especialidad) return res.status(400).json({ success:false, error:'Especialidad es requerida' });
+
+    if (!agenda || !AGENDAS[agenda]) {
+        return res.status(400).json({
+            success: false,
+            error: 'Agenda no válida'
+        });
+    }
+
+    if (!especialidad) {
+        return res.status(400).json({
+            success: false,
+            error: 'Especialidad es requerida'
+        });
+    }
 
     try {
         const result = await queueRequest(async () => {
             const startTs = Date.now();
             log(`👨‍⚕️ Obteniendo profesionales de ${agenda} para: ${especialidad}`);
+
             const browserInstance = await getBrowser();
             const page = await browserInstance.newPage();
+
             try {
                 await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
                 await page.setExtraHTTPHeaders({ 'Accept-Language': 'es-CL,es;q=0.9,en;q=0.8' });
                 await page.setViewport({ width: 1200, height: 900 });
             } catch (e) {}
+
             page.on('console', msg => { try{ console.log('PAGE LOG>', msg.type(), msg.text()); }catch(e){} });
             page.on('pageerror', err => { console.log('PAGE ERROR>', err && err.stack ? err.stack : String(err)); });
             page.on('requestfailed', req => { const f = req.failure && req.failure(); console.log('REQUEST FAILED>', req.url(), f && f.errorText); });
             page.on('request', req => { try { console.log('REQUEST>', req.method(), req.resourceType(), req.url()); } catch(e){} });
+
             try {
-                await page.goto(AGENDAS[agenda], { waitUntil: 'domcontentloaded', timeout: 60000 });
+                await page.goto(AGENDAS[agenda], {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 60000
+                });
                 console.log(`⏱ after goto (profesionales): ${Date.now() - startTs} ms`);
+
                 await clickButtonByText(page, 'reservar hora').catch(() => {});
                 await page.waitForTimeout(600);
                 await clickButtonByText(page, 'por especialidad').catch(() => {});
                 await page.waitForTimeout(800);
+
                 const clickedEspecialidad = await clickElementInSelectorByText(page, '.cellWidget, .especialidad, .service-item', especialidad);
                 if (!clickedEspecialidad) {
                     const tried = await page.evaluate((esp) => {
@@ -296,20 +358,25 @@ app.get('/api/profesionales', async (req, res) => {
                         const el = all.find(e => n(e.textContent || '').includes(txt));
                         if (el) {
                             const clickable = el.querySelector('button, a') || el;
-                            clickable.scrollIntoView({behavior:'auto', block:'center'});
+                            clickable.scrollIntoView({behavior: 'auto', block:'center'});
                             clickable.click();
                             return true;
                         }
                         return false;
                     }, especialidad);
-                    if (!tried) return { success:false, error:'No se pudo seleccionar la especialidad' };
+                    if (!tried) {
+                        return { success: false, error: 'No se pudo seleccionar la especialidad' };
+                    }
                 }
+
                 await page.waitForTimeout(1200);
                 console.log(`⏱ after select especialidad: ${Date.now() - startTs} ms`);
+
                 const profesionales = await page.evaluate(() => {
                     const profesionalesData = [];
                     const bodyText = document.body.innerText || '';
                     const lines = bodyText.split('\n').map(l => l.trim()).filter(l => l);
+
                     for (let i = 0; i < lines.length; i++) {
                         const line = lines[i];
                         if (/especialidad[:\s]/i.test(line) && i > 0) {
@@ -317,7 +384,12 @@ app.get('/api/profesionales', async (req, res) => {
                             const especialidad = line.replace(/Especialidad[:\s]/i, '').trim();
                             const sucursal = lines[i + 1] && /Sucursal[:\s]/i.test(lines[i+1]) ? lines[i+1].replace(/Sucursal[:\s]/i,'').trim() : '';
                             if (nombre && nombre.length > 3 && !/especialidad|seleccione/i.test(nombre)) {
-                                profesionalesData.push({ nombre: nombre, especialidad: especialidad, sucursal: sucursal, value: nombre });
+                                profesionalesData.push({
+                                    nombre: nombre,
+                                    especialidad: especialidad,
+                                    sucursal: sucursal,
+                                    value: nombre
+                                });
                             }
                         }
                     }
@@ -342,22 +414,36 @@ app.get('/api/profesionales', async (req, res) => {
                     });
                     return unique;
                 });
+
                 console.log('DEBUG profesionales raw', JSON.stringify(profesionales));
+
                 requestCount++;
                 console.log(`✅ Encontrados ${profesionales.length} profesionales - tiempo: ${Date.now() - startTs} ms`);
-                return { success:true, agenda:agenda, especialidad:especialidad, total:profesionales.length, profesionales:profesionales };
+
+                return {
+                    success: true,
+                    agenda: agenda,
+                    especialidad: especialidad,
+                    total: profesionales.length,
+                    profesionales: profesionales
+                };
             } finally {
                 try { await page.close(); } catch (e) {}
             }
         });
+
         res.json(result);
+
     } catch (error) {
         console.error('❌ Error al obtener profesionales:', error);
-        res.status(500).json({ success:false, error:error.message });
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
     }
 });
 
-// -------------------- HORAS (MEJORAS: intercept + capture application response) --------------------
+// -------------------- HORAS (MEJORAS: intercept + capture application response + extended waits) --------------------
 
 app.get('/api/horas', async (req, res) => {
     const { agenda, especialidad, profesional, fecha } = req.query;
@@ -529,11 +615,27 @@ app.get('/api/horas', async (req, res) => {
                 console.log(`⏱ after select profesional: ${Date.now() - startTs} ms`);
 
                 // Wait specifically for the application POST that builds availability
+                // Aumentamos timeout (60s) y, además, esperamos en el DOM a que aparezca
+                // al menos un patrón HH:MM para asegurar que la página procesó la respuesta.
                 try {
-                    await page.waitForResponse(r => (r.url().toLowerCase().includes('/onlinebooking/application') || r.url().toLowerCase().includes('/application')) && r.status() === 200, { timeout: 20000 });
-                    console.log('ℹ️ Capturada response /onlineBooking/application');
+                    await page.waitForResponse(
+                        r => (r.url().toLowerCase().includes('/onlinebooking/application') || r.url().toLowerCase().includes('/application')) && r.status() === 200,
+                        { timeout: 60000 } // aumentar si el host está lento
+                    );
+                    console.log('ℹ️ Capturada response /onlineBooking/application (waitForResponse)');
                 } catch (e) {
-                    console.log('⚠️ Timeout esperando /onlineBooking/application response');
+                    console.log('⚠️ Timeout esperando /onlineBooking/application response (waitForResponse)');
+                }
+
+                // Además esperar en el DOM a que aparezca un patrón HH:MM (fallback)
+                try {
+                    await page.waitForFunction(
+                        () => /\b\d{1,2}:\d{2}\b/.test(document.body.innerText),
+                        { timeout: 60000 }
+                    );
+                    console.log('ℹ️ Detectado patrón HH:MM en el DOM (waitForFunction)');
+                } catch (e) {
+                    console.log('⚠️ Timeout esperando patrón HH:MM en el DOM (waitForFunction)');
                 }
 
                 // Try to extract times from lastXHR if present
